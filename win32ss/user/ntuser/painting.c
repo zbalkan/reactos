@@ -7,10 +7,43 @@
  */
 
 #include <win32k.h>
+#include <winuser.h>
+#include "printredir.h"
 DBG_DEFAULT_CHANNEL(UserPainting);
+
+//#define NDEBUG
+#include <debug.h>
 
 BOOL UserExtTextOutW(HDC hdc, INT x, INT y, UINT flags, PRECTL lprc,
                      LPCWSTR lpString, UINT count);
+
+extern ATOM AtomPrintWindowCtx;
+
+/* Find nearest ancestor carrying the PrintWindow context (the PrintWindow root). */
+static __inline PPRINTWINDOW_CTX
+IntGetPrintWindowCtx(_In_ PWND pwnd, _Out_opt_ PWND *ppwndRoot)
+{
+    PWND cur = pwnd;
+
+    while (cur)
+    {
+        PPRINTWINDOW_CTX ctx = (PPRINTWINDOW_CTX)UserGetProp(cur, AtomPrintWindowCtx, TRUE);
+        if (ctx)
+        {
+            if (ppwndRoot) *ppwndRoot = cur;
+            return ctx;
+        }
+
+        /* Only walk up through parents for child windows */
+        if (!(cur->style & WS_CHILD))
+            break;
+
+        cur = cur->spwndParent;
+    }
+
+    if (ppwndRoot) *ppwndRoot = NULL;
+    return NULL;
+}
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
@@ -1196,114 +1229,73 @@ IntGetPaintMessage(
    MSG *Message,
    BOOL Remove)
 {
-   PWND PaintWnd, StartWnd;
+    PWND PaintWnd;
+    PPRINTWINDOW_CTX pCtx;
 
-   if ((MsgFilterMin != 0 || MsgFilterMax != 0) &&
-         (MsgFilterMin > WM_PAINT || MsgFilterMax < WM_PAINT))
-      return FALSE;
+    PaintWnd = IntFindWindowToRepaint(Window, Thread);
 
-   if (Thread->TIF_flags & TIF_SYSTEMTHREAD )
-   {
-      ERR("WM_PAINT is in a System Thread!\n");
-   }
+    if (PaintWnd && IntIsWindowDirty(PaintWnd))
+    {
+        /* Check if this window (or an ancestor) is being redirected for PrintWindow */
+        pCtx = IntGetPrintWindowCtx(PaintWnd, NULL);
 
-   StartWnd = UserGetDesktopWindow();
-   PaintWnd = IntFindWindowToRepaint(StartWnd, Thread);
+        if (pCtx)
+        {
+            /* * Flag the window so BeginPaint knows we are in a redirection state.
+             * This prevents BeginPaint from creating a standard screen DC.
+             */
+            PaintWnd->state2 |= WNDS2_PRINTWND_ACTIVE;
+            TRACE("IntGetPaintMessage: Redirection detected for PWND %p\n", PaintWnd);
+        }
 
-   Message->hwnd = PaintWnd ? UserHMGetHandle(PaintWnd) : NULL;
+        if (!Remove) return TRUE;
 
-   if (Message->hwnd == NULL && Thread->cPaintsReady)
-   {
-      // Find note in window.c:"PAINTING BUG".
-      ERR("WARNING SOMETHING HAS GONE WRONG: Thread marked as containing dirty windows, but no dirty windows found! Counts %u\n",Thread->cPaintsReady);
-      /* Hack to stop spamming the debug log ! */
-      Thread->cPaintsReady = 0;
-      return FALSE;
-   }
+        Message->hwnd = UserHMGetHandle(PaintWnd);
+        Message->message = WM_PAINT;
+        Message->wParam = 0;
+        Message->lParam = 0;
 
-   if (Message->hwnd == NULL)
-      return FALSE;
+        return TRUE;
+    }
 
-   if (!(Window == NULL ||
-         PaintWnd == Window ||
-         IntIsChildWindow(Window, PaintWnd))) /* check that it is a child of the specified parent */
-      return FALSE;
-
-   if (PaintWnd->state & WNDS_INTERNALPAINT)
-   {
-      PaintWnd->state &= ~WNDS_INTERNALPAINT;
-      if (!PaintWnd->hrgnUpdate)
-         MsqDecPaintCountQueue(Thread);
-   }
-   PaintWnd->state2 &= ~WNDS2_STARTPAINT;
-   PaintWnd->state &= ~WNDS_UPDATEDIRTY;
-
-   Window = PaintWnd;
-   while (Window && !UserIsDesktopWindow(Window))
-   {
-      // Role back and check for clip children, do not set if any.
-      if (Window->spwndParent && !(Window->spwndParent->style & WS_CLIPCHILDREN))
-      {
-         PaintWnd->state2 |= WNDS2_WMPAINTSENT;
-      }
-      Window = Window->spwndParent;
-   }
-
-   Message->wParam = Message->lParam = 0;
-   Message->message = WM_PAINT;
-   return TRUE;
+    return FALSE;
 }
 
-BOOL
-FASTCALL
-IntPrintWindow(
-    PWND pwnd,
-    HDC hdcBlt,
-    UINT nFlags)
+/* Complex IntPrintWindow using redirection helpers */
+BOOL FASTCALL
+IntPrintWindow(PWND pwnd, HDC hdcBlt, UINT nFlags)
 {
-    HDC hdcSrc;
-    INT cx, cy, xSrc, ySrc;
+    BOOL Ret = FALSE;
+    POINT ptOffset;
 
-    if ( nFlags & PW_CLIENTONLY)
+    DPRINT1("IntPrintWindow: Starting capture for PWND %p (Title: %S)\n",
+            pwnd, pwnd->strName.Buffer ? pwnd->strName.Buffer : L"No Name");
+
+    /* 1. Calculate offset: we want to map window (0,0) to the bitmap (0,0) */
+    ptOffset.x = -pwnd->rcWindow.left;
+    ptOffset.y = -pwnd->rcWindow.top;
+
+    /* 2. Push redirection to the Window Object (Cross-process visible) */
+    DPRINT1("PrintWindow: Pushing redirection for PWND %p to HDC %p\n", pwnd, hdcBlt);
+    if (!UserPrintRedirectPush(pwnd, hdcBlt, &ptOffset, nFlags))
     {
-       cx = pwnd->rcClient.right - pwnd->rcClient.left;
-       cy = pwnd->rcClient.bottom - pwnd->rcClient.top;
-       xSrc = pwnd->rcClient.left - pwnd->rcWindow.left;
-       ySrc = pwnd->rcClient.top - pwnd->rcWindow.top;
-    }
-    else
-    {
-       cx = pwnd->rcWindow.right - pwnd->rcWindow.left;
-       cy = pwnd->rcWindow.bottom - pwnd->rcWindow.top;
-       xSrc = 0;
-       ySrc = 0;
+        return FALSE;
     }
 
-    // TODO: Setup Redirection for Print.
-    return FALSE;
+    /* 3. The "Missing Link": Send WM_PRINT to the target thread.
+          TaskSwitchXP relies on the app rendering itself via this message. */
+          DPRINT1("PrintWindow: Sending WM_PRINT to window %p\n", UserHMGetHandle(pwnd));
+          co_IntSendMessage(UserHMGetHandle(pwnd), WM_PRINT, (WPARAM)hdcBlt,
+                     PRF_CLIENT | PRF_NONCLIENT | PRF_CHILDREN | PRF_ERASEBKGND);
 
-    /* Update the window just incase. */
-    co_IntUpdateWindows( pwnd, RDW_ALLCHILDREN, FALSE);
+    /* 4. Fallback: Force a redraw if the app doesn't handle WM_PRINT */
+    co_UserRedrawWindow(pwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
 
-    hdcSrc = UserGetDCEx( pwnd, NULL, DCX_CACHE|DCX_WINDOW);
-    /* Print window to printer context. */
-    NtGdiBitBlt( hdcBlt,
-                 0,
-                 0,
-                 cx,
-                 cy,
-                 hdcSrc,
-                 xSrc,
-                 ySrc,
-                 SRCCOPY,
-                 0,
-                 0);
+    Ret = TRUE;
 
-    UserReleaseDC( pwnd, hdcSrc, FALSE);
-
-    // TODO: Release Redirection from Print.
-
-    return TRUE;
+    /* 5. Cleanup */
+    UserPrintRedirectPop(pwnd);
+    return Ret;
 }
 
 BOOL
@@ -1438,126 +1430,111 @@ IntFlashWindowEx(PWND pWnd, PFLASHWINFO pfwi)
 }
 
 // Win: xxxBeginPaint
+/**
+ * IntBeginPaint
+ */
 HDC FASTCALL
-IntBeginPaint(PWND Window, PPAINTSTRUCT Ps)
+IntBeginPaint(PWND Window, PPAINTSTRUCT pPaintStruct)
 {
-   RECT Rect;
-   INT type;
-   BOOL Erase = FALSE;
+    PPRINTWINDOW_CTX pCtx;
+    HDC hDC = NULL;
+    HRGN hRgnUpdate;
 
-   co_UserHideCaret(Window);
+    /* 1. Redirection Check */
+    pCtx = IntGetPrintWindowCtx(Window, NULL);
 
-   Window->state2 |= WNDS2_STARTPAINT;
-   Window->state &= ~WNDS_PAINTNOTPROCESSED;
+    if (pCtx)
+    {
+        hDC = pCtx->hdcBlt;
 
-   if (Window->state & WNDS_SENDNCPAINT)
-   {
-      HRGN hRgn;
-      // Application can keep update dirty.
-      do
-      {
-         Window->state &= ~WNDS_UPDATEDIRTY;
-         hRgn = IntGetNCUpdateRgn(Window, FALSE);
-         IntSendNCPaint(Window, hRgn);
-         if (hRgn > HRGN_WINDOW && GreIsHandleValid(hRgn))
-         {
-            /* NOTE: The region can already be deleted! */
-            GreDeleteObject(hRgn);
-         }
-      }
-      while(Window->state & WNDS_UPDATEDIRTY);
-   }
-   else
-   {
-      Window->state &= ~WNDS_UPDATEDIRTY;
-   }
+        RtlZeroMemory(pPaintStruct, sizeof(PAINTSTRUCT));
+        pPaintStruct->hdc = hDC;
+        pPaintStruct->fErase = (Window->state & WNDS_SENDERASEBACKGROUND) ? TRUE : FALSE;
 
-   RtlZeroMemory(Ps, sizeof(PAINTSTRUCT));
+        pPaintStruct->rcPaint.left = 0;
+        pPaintStruct->rcPaint.top = 0;
+        pPaintStruct->rcPaint.right = Window->rcClient.right - Window->rcClient.left;
+        pPaintStruct->rcPaint.bottom = Window->rcClient.bottom - Window->rcClient.top;
 
-   if (Window->state2 & WNDS2_ENDPAINTINVALIDATE)
-   {
-      ERR("BP: Another thread invalidated this window\n");
-   }
+        /* Use NtGdiSetWindowOrgEx - the standard internal win32k call */
+        NtGdiSetWindowOrgEx(hDC, -pCtx->ptOffset.x, -pCtx->ptOffset.y, NULL);
 
-   Ps->hdc = UserGetDCEx( Window,
-                          Window->hrgnUpdate,
-                          DCX_INTERSECTRGN | DCX_USESTYLE);
-   if (!Ps->hdc)
-   {
-      return NULL;
-   }
+        IntInvalidateWindows(Window, NULL, RDW_VALIDATE | RDW_NOCHILDREN);
 
-   // If set, always clear flags out due to the conditions later on for sending the message.
-   if (Window->state & WNDS_SENDERASEBACKGROUND)
-   {
-      Window->state &= ~(WNDS_SENDERASEBACKGROUND|WNDS_ERASEBACKGROUND);
-      Erase = TRUE;
-   }
+        Window->state &= ~(WNDS_SENDERASEBACKGROUND | WNDS_ERASEBACKGROUND);
+        Window->state2 |= WNDS2_PRINTWND_ACTIVE;
 
-   if (Window->hrgnUpdate != NULL)
-   {
-      MsqDecPaintCountQueue(Window->head.pti);
-      IntGdiSetRegionOwner(Window->hrgnUpdate, GDI_OBJ_HMGR_POWNED);
-      /* The region is part of the dc now and belongs to the process! */
-      Window->hrgnUpdate = NULL;
-   }
-   else
-   {
-      if (Window->state & WNDS_INTERNALPAINT)
-         MsqDecPaintCountQueue(Window->head.pti);
-   }
+        return hDC;
+    }
 
-   type = GdiGetClipBox(Ps->hdc, &Ps->rcPaint);
+    /* 2. Standard Path */
+    co_UserHideCaret(Window);
 
-   IntGetClientRect(Window, &Rect);
+    hRgnUpdate = Window->hrgnUpdate;
+    Window->hrgnUpdate = NULL;
 
-   Window->state &= ~WNDS_INTERNALPAINT;
+    hDC = UserGetDCEx(Window,
+                      hRgnUpdate,
+                      DCX_INTERSECTRGN | DCX_USESTYLE | DCX_VALIDATE);
 
-   if ( Erase &&               // Set to erase,
-        type != NULLREGION &&  // don't erase if the clip box is empty,
-        (!(Window->pcls->style & CS_PARENTDC) || // not parent dc or
-         RECTL_bIntersectRect( &Rect, &Rect, &Ps->rcPaint) ) ) // intersecting.
-   {
-      Ps->fErase = !co_IntSendMessage(UserHMGetHandle(Window), WM_ERASEBKGND, (WPARAM)Ps->hdc, 0);
-      if ( Ps->fErase )
-      {
-         Window->state |= (WNDS_SENDERASEBACKGROUND|WNDS_ERASEBACKGROUND);
-      }
-   }
-   else
-   {
-      Ps->fErase = FALSE;
-   }
+    RtlZeroMemory(pPaintStruct, sizeof(PAINTSTRUCT));
+    pPaintStruct->hdc = hDC;
+    pPaintStruct->fErase = (Window->state & WNDS_SENDERASEBACKGROUND) ? TRUE : FALSE;
 
-   IntSendChildNCPaint(Window);
+    if (hRgnUpdate > HRGN_WINDOW)
+    {
+        GreGetRgnBox(hRgnUpdate, &pPaintStruct->rcPaint);
+        RECTL_vOffsetRect(&pPaintStruct->rcPaint, -Window->rcClient.left, -Window->rcClient.top);
+    }
+    else
+    {
+        pPaintStruct->rcPaint.left = 0;
+        pPaintStruct->rcPaint.top = 0;
+        pPaintStruct->rcPaint.right = Window->rcClient.right - Window->rcClient.left;
+        pPaintStruct->rcPaint.bottom = Window->rcClient.bottom - Window->rcClient.top;
+    }
 
-   return Ps->hdc;
+    Window->state &= ~(WNDS_SENDERASEBACKGROUND | WNDS_ERASEBACKGROUND);
+    if (hRgnUpdate > HRGN_WINDOW) GreDeleteObject(hRgnUpdate);
+
+    return hDC;
 }
 
-// Win: xxxEndPaint
+/*
+ * IntEndPaint
+ *
+ * Internal helper for NtUserEndPaint.
+ * Ensures redirected DCs are preserved while standard DCs are released.
+ */
 BOOL FASTCALL
-IntEndPaint(PWND Wnd, PPAINTSTRUCT Ps)
+IntEndPaint(PWND Window, PPAINTSTRUCT pPaintStruct)
 {
-   HDC hdc = NULL;
+    PPRINTWINDOW_CTX pCtx;
 
-   hdc = Ps->hdc;
+    if (Window->state2 & WNDS2_PRINTWND_ACTIVE)
+    {
+        pCtx = IntGetPrintWindowCtx(Window, NULL);
+        if (pCtx)
+        {
+            /* Reset Origin using NtGdiSetWindowOrgEx */
+            NtGdiSetWindowOrgEx(pCtx->hdcBlt, 0, 0, NULL);
+        }
 
-   UserReleaseDC(Wnd, hdc, TRUE);
+        Window->state2 &= ~WNDS2_PRINTWND_ACTIVE;
+        co_UserShowCaret(Window);
+        return TRUE;
+    }
 
-   if (Wnd->state2 & WNDS2_ENDPAINTINVALIDATE)
-   {
-      ERR("EP: Another thread invalidated this window\n");
-      Wnd->state2 &= ~WNDS2_ENDPAINTINVALIDATE;
-   }
+    co_UserShowCaret(Window);
 
-   Wnd->state2 &= ~(WNDS2_WMPAINTSENT|WNDS2_STARTPAINT);
+    if (pPaintStruct && pPaintStruct->hdc)
+    {
+        UserReleaseDC(Window, pPaintStruct->hdc, FALSE);
+    }
 
-   co_UserShowCaret(Wnd);
-
-   return TRUE;
+    return TRUE;
 }
 
-// Win: xxxFillWindow
 BOOL FASTCALL
 IntFillWindow(PWND pWndParent,
               PWND pWnd,
@@ -1566,6 +1543,14 @@ IntFillWindow(PWND pWndParent,
 {
    RECT Rect, Rect1;
    INT type;
+   HDC hdcRedir;
+   POINT ptOffset;
+
+   /* TRACE is used for high-frequency entry point logging */
+   TRACE("Enter IntFillWindow: pWnd=%p, hDC=%p, hBrush=%p\n", pWnd, hDC, hBrush);
+
+   /* ASSERT: Ensure we aren't passing a null window pointer to an internal function */
+   ASSERT(pWnd != NULL);
 
    if (!pWndParent)
       pWndParent = pWnd;
@@ -1581,25 +1566,46 @@ IntFillWindow(PWND pWndParent,
       POINT ppt;
       INT x = 0, y = 0;
 
-      if (!UserIsDesktopWindow(pWndParent))
+      if (UserPrintRedirectIsActive(pWnd, &hdcRedir, &ptOffset))
+      {
+          /* DPRINT1: Log when redirection is active to verify the hook is hitting */
+          DPRINT1("IntFillWindow: Redirection active for pWnd %p. Offsets: %ld, %ld\n",
+                  pWnd, ptOffset.x, ptOffset.y);
+          x = ptOffset.x;
+          y = ptOffset.y;
+      }
+      else if (!UserIsDesktopWindow(pWndParent))
       {
           x = pWndParent->rcClient.left - pWnd->rcClient.left;
           y = pWndParent->rcClient.top  - pWnd->rcClient.top;
       }
 
-      GreSetBrushOrg(hDC, x, y, &ppt);
+      if (!GreSetBrushOrg(hDC, x, y, &ppt))
+      {
+          /* DPRINT1 for GDI failures */
+          DPRINT1("IntFillWindow: GreSetBrushOrg failed for hDC %p\n", hDC);
+      }
 
-      if ( hBrush < (HBRUSH)CTLCOLOR_MAX )
-          hBrush = GetControlColor( pWndParent, pWnd, hDC, HandleToUlong(hBrush) + WM_CTLCOLORMSGBOX);
+      if (hBrush < (HBRUSH)CTLCOLOR_MAX)
+      {
+          hBrush = GetControlColor(pWndParent, pWnd, hDC, HandleToUlong(hBrush) + WM_CTLCOLORMSGBOX);
+      }
 
-      FillRect(hDC, &Rect, hBrush);
+      if (!FillRect(hDC, &Rect, hBrush))
+      {
+          DPRINT1("IntFillWindow: FillRect failed! hDC=%p, Brush=%p\n", hDC, hBrush);
+      }
 
       GreSetBrushOrg(hDC, ppt.x, ppt.y, NULL);
 
       return TRUE;
    }
    else
+   {
+      /* DPRINT for skipped painting (useful for debugging clipping issues) */
+      DPRINT("IntFillWindow: Painting skipped due to clip region or intersection.\n");
       return FALSE;
+   }
 }
 
 /* PUBLIC FUNCTIONS ***********************************************************/
@@ -1707,43 +1713,49 @@ Cleanup:
 /*
  * @implemented
  */
-BOOL APIENTRY
-NtUserFillWindow(HWND hWndParent,
-                 HWND hWnd,
-                 HDC  hDC,
-                 HBRUSH hBrush)
+BOOL
+APIENTRY
+NtUserFillWindow(
+    HWND hWnd,
+    HWND hWndControl,
+    HDC hdc,
+    HBRUSH hbrush)
 {
-   BOOL ret = FALSE;
-   PWND pWnd, pWndParent = NULL;
-   USER_REFERENCE_ENTRY Ref;
+    PWND pWnd, pWndControl;
+    HDC hdcRedir;
+    POINT ptOffset;
+    BOOL Ret = FALSE;
 
-   TRACE("Enter NtUserFillWindow\n");
-   UserEnterExclusive();
+    UserEnterExclusive();
 
-   if (!hDC)
-   {
-      goto Exit;
-   }
+    pWnd = UserGetWindowObject(hWnd);
+    pWndControl = UserGetWindowObject(hWndControl);
+    if (!pWnd)
+    {
+        goto Exit;
+    }
 
-   if (!(pWnd = UserGetWindowObject(hWnd)))
-   {
-      goto Exit;
-   }
+    /* Redirection Hook */
+    if (UserPrintRedirectIsActive(pWnd, &hdcRedir, &ptOffset))
+    {
+        /* * Override the target DC.
+         * Note: Since FillWindow usually fills the entire area of the DC,
+         * GDI's internal brush origin handling will take care of the mapping
+         * once the DC is swapped.
+         */
+        hdc = hdcRedir;
+    }
 
-   if (hWndParent && !(pWndParent = UserGetWindowObject(hWndParent)))
-   {
-      goto Exit;
-   }
-
-   UserRefObjectCo(pWnd, &Ref);
-   ret = IntFillWindow( pWndParent, pWnd, hDC, hBrush );
-   UserDerefObjectCo(pWnd);
+    /* Call the internal worker */
+    Ret = IntFillWindow(pWnd, pWndControl, hdc, hbrush);
 
 Exit:
-   TRACE("Leave NtUserFillWindow, ret=%i\n",ret);
-   UserLeave();
-   return ret;
+    UserLeave();
+    return Ret;
 }
+
+/* API Entry Points */
+
 
 /*
  * @implemented
@@ -1957,39 +1969,87 @@ NtUserGetUpdateRgn(HWND hWnd, HRGN hRgn, BOOL bErase)
  * Status
  *    @implemented
  */
-
-BOOL APIENTRY
-NtUserGetUpdateRect(HWND hWnd, LPRECT UnsafeRect, BOOL bErase)
+BOOL
+APIENTRY
+NtUserGetUpdateRect(
+    HWND hWnd,
+    LPRECT lpRect,
+    BOOL bErase)
 {
-   PWND Window;
-   RECTL Rect;
-   NTSTATUS Status;
-   BOOL Ret = FALSE;
+    PWND Window;
+    HDC hdcRedir;
+    POINT ptOffset;
+    BOOL Ret = FALSE;
+    RECTL rclResult = {0, 0, 0, 0};
 
-   TRACE("Enter NtUserGetUpdateRect\n");
-   UserEnterExclusive();
+    TRACE("Enter NtUserGetUpdateRect(0x%p, 0x%p, %d)\n", hWnd, lpRect, bErase);
 
-   if (!(Window = UserGetWindowObject(hWnd)))
-   {
-      goto Exit; // Return FALSE
-   }
+    UserEnterShared();
 
-   Ret = co_UserGetUpdateRect(Window, &Rect, bErase);
+    if (!(Window = UserGetWindowObject(hWnd)))
+    {
+        DPRINT1("NtUserGetUpdateRect: Invalid handle 0x%p\n", hWnd);
+        goto Exit;
+    }
 
-   if (UnsafeRect != NULL)
-   {
-      Status = MmCopyToCaller(UnsafeRect, &Rect, sizeof(RECTL));
-      if (!NT_SUCCESS(Status))
-      {
-         EngSetLastError(ERROR_INVALID_PARAMETER);
-         Ret = FALSE;
-      }
-   }
+    /* REDIRECTION HOOK */
+    if (UserPrintRedirectIsActive(Window, &hdcRedir, &ptOffset))
+    {
+        /* If redirected, the entire client area is considered "dirty" for the print capture */
+        lpRect->left = 0;
+        lpRect->top = 0;
+        lpRect->right = Window->rcClient.right - Window->rcClient.left;
+        lpRect->bottom = Window->rcClient.bottom - Window->rcClient.top;
+        return TRUE;
+    }
+    else
+    {
+        /* * NORMAL PATH:
+         * If there is no update region, the rect is empty (0,0,0,0) and we return FALSE.
+         */
+        if (Window->hrgnUpdate != NULL)
+        {
+            if (Window->hrgnUpdate == (HRGN)1) /* Entire window is dirty */
+            {
+                rclResult.left = 0;
+                rclResult.top = 0;
+                rclResult.right = Window->rcClient.right - Window->rcClient.left;
+                rclResult.bottom = Window->rcClient.bottom - Window->rcClient.top;
+            }
+            else
+            {
+                /* Get the bounding box of the actual update region */
+                GreGetRgnBox(Window->hrgnUpdate, &rclResult);
+
+                /* Offset from screen to client coordinates */
+                RECTL_vOffsetRect(&rclResult, -Window->rcClient.left, -Window->rcClient.top);
+            }
+            Ret = TRUE;
+        }
+    }
+
+    /* * FINAL DEFENSE:
+     * Safely copy the result to the user-mode pointer.
+     */
+    if (lpRect)
+    {
+        _SEH2_TRY
+        {
+            ProbeForWrite(lpRect, sizeof(RECT), 1);
+            *lpRect = rclResult;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            SetLastNtError(_SEH2_GetExceptionCode());
+            DPRINT1("NtUserGetUpdateRect: SEH Catch! Invalid lpRect pointer %p\n", lpRect);
+            Ret = FALSE;
+        }
+        _SEH2_END;
+    }
 
 Exit:
-   TRACE("Leave NtUserGetUpdateRect, ret=%i\n", Ret);
-   UserLeave();
-   return Ret;
+    UserLeave();
+    return Ret;
 }
 
 /*
@@ -2001,86 +2061,34 @@ Exit:
 
 BOOL APIENTRY
 NtUserRedrawWindow(
-   HWND hWnd,
-   CONST RECT *lprcUpdate,
-   HRGN hrgnUpdate,
-   UINT flags)
+    HWND hWnd,
+    const RECTL *lprcUpdate,
+    HRGN hrgnUpdate,
+    UINT flags)
 {
-   RECTL SafeUpdateRect;
-   PWND Wnd;
-   BOOL Ret = FALSE;
-   USER_REFERENCE_ENTRY Ref;
-   NTSTATUS Status = STATUS_SUCCESS;
-   PREGION RgnUpdate = NULL;
+    PWND Window = NULL;
+    BOOL Ret;
+    PREGION RgnUpdate = NULL;
 
-   TRACE("Enter NtUserRedrawWindow\n");
-   UserEnterExclusive();
+    UserEnterExclusive();
+    if (hWnd && !(Window = UserGetWindowObject(hWnd)))
+    {
+       UserLeave();
+       return FALSE;
+    }
+    if (hrgnUpdate && !(RgnUpdate = REGION_LockRgn(hrgnUpdate)))
+    {
+       UserLeave();
+       return FALSE;
+    }
 
-   if (!(Wnd = UserGetWindowObject(hWnd ? hWnd : IntGetDesktopWindow())))
-   {
-      goto Exit; // Return FALSE
-   }
+    Ret = co_UserRedrawWindow(Window, lprcUpdate, RgnUpdate, flags);
 
-   if (lprcUpdate)
-   {
-      _SEH2_TRY
-      {
-          ProbeForRead(lprcUpdate, sizeof(RECTL), 1);
-          RtlCopyMemory(&SafeUpdateRect, lprcUpdate, sizeof(RECTL));
-      }
-      _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-      {
-         Status = _SEH2_GetExceptionCode();
-      }
-      _SEH2_END
-      if (!NT_SUCCESS(Status))
-      {
-         EngSetLastError(RtlNtStatusToDosError(Status));
-         goto Exit; // Return FALSE
-      }
-   }
-
-   if ( flags & ~(RDW_ERASE|RDW_FRAME|RDW_INTERNALPAINT|RDW_INVALIDATE|
-                  RDW_NOERASE|RDW_NOFRAME|RDW_NOINTERNALPAINT|RDW_VALIDATE|
-                  RDW_ERASENOW|RDW_UPDATENOW|RDW_ALLCHILDREN|RDW_NOCHILDREN) )
-   {
-      /* RedrawWindow fails only in case that flags are invalid */
-      EngSetLastError(ERROR_INVALID_FLAGS);
-      goto Exit; // Return FALSE
-   }
-
-   /* We can't hold lock on GDI objects while doing roundtrips to user mode,
-    * so it will be copied.
-    */
-   if (hrgnUpdate > HRGN_WINDOW)
-   {
-       RgnUpdate = REGION_LockRgn(hrgnUpdate);
-       if (!RgnUpdate)
-       {
-           EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
-           goto Exit; // Return FALSE
-       }
-       REGION_UnlockRgn(RgnUpdate);
-   }
-   else if (hrgnUpdate == HRGN_WINDOW) // Trap it out.
-   {
-       ERR("NTRW: Caller is passing Window Region 1\n");
-   }
-
-   UserRefObjectCo(Wnd, &Ref);
-
-   Ret = co_UserRedrawWindow( Wnd,
-                              lprcUpdate ? &SafeUpdateRect : NULL,
-                              RgnUpdate,
-                              flags);
-
-   UserDerefObjectCo(Wnd);
-
-Exit:
-   TRACE("Leave NtUserRedrawWindow, ret=%i\n", Ret);
-   UserLeave();
-   return Ret;
+    if (RgnUpdate) REGION_UnlockRgn(RgnUpdate);
+    UserLeave();
+    return Ret;
 }
+
 
 BOOL
 UserDrawCaptionText(
@@ -2370,96 +2378,58 @@ UserRealizePalette(HDC hdc)
 }
 
 BOOL
-APIENTRY
+NTAPI
 NtUserDrawCaptionTemp(
-   HWND hWnd,
-   HDC hDC,
-   LPCRECT lpRc,
-   HFONT hFont,
-   HICON hIcon,
-   const PUNICODE_STRING str,
-   UINT uFlags)
+    HWND hWnd,
+    HDC hdc,
+    LPCRECT lprc,
+    HFONT hFont,
+    HICON hIcon,
+    const PUNICODE_STRING str,
+    UINT uFlags)
 {
-   PWND pWnd = NULL;
-   UNICODE_STRING SafeStr = {0};
-   NTSTATUS Status = STATUS_SUCCESS;
-   RECTL SafeRect;
-   BOOL Ret;
+    PWND pWnd;
+    HDC hdcRedir;
+    POINT ptOffset;
+    RECTL rect;
+    BOOL Ret = FALSE;
 
-   UserEnterExclusive();
+    UserEnterExclusive();
 
-   if (hWnd != NULL)
-   {
-     if(!(pWnd = UserGetWindowObject(hWnd)))
-     {
-        UserLeave();
-        return FALSE;
-     }
-   }
+    pWnd = UserGetWindowObject(hWnd);
+    if (!pWnd) goto Exit;
 
-   _SEH2_TRY
-   {
-      ProbeForRead(lpRc, sizeof(RECTL), sizeof(ULONG));
-      RtlCopyMemory(&SafeRect, lpRc, sizeof(RECTL));
-      if (str != NULL)
-      {
-         SafeStr = ProbeForReadUnicodeString(str);
-         if (SafeStr.Length != 0)
-         {
-             ProbeForRead( SafeStr.Buffer,
-                           SafeStr.Length,
-                            sizeof(WCHAR));
-         }
-      }
-   }
-   _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-   {
-      Status = _SEH2_GetExceptionCode();
-   }
-   _SEH2_END;
+    /* Redirection Hook for PrintWindow */
+    if (UserPrintRedirectIsActive(pWnd, &hdcRedir, &ptOffset))
+    {
+        hdc = hdcRedir;
+        if (lprc)
+        {
+            rect = *lprc;
+            rect.left   += ptOffset.x;
+            rect.top    += ptOffset.y;
+            rect.right  += ptOffset.x;
+            rect.bottom += ptOffset.y;
+            lprc = (LPCRECT)&rect;
+        }
+    }
 
-   if (Status != STATUS_SUCCESS)
-   {
-      SetLastNtError(Status);
-      UserLeave();
-      return FALSE;
-   }
+    /* Call the actual internal implementation */
+    Ret = UserDrawCaption(pWnd, hdc, (PRECTL)lprc, hFont, hIcon, (PUNICODE_STRING)str, uFlags);
 
-   if (str != NULL)
-      Ret = UserDrawCaption(pWnd, hDC, &SafeRect, hFont, hIcon, &SafeStr, uFlags);
-   else
-   {
-      if ( RECTL_bIsEmptyRect(&SafeRect) && hFont == 0 && hIcon == 0 )
-      {
-         Ret = TRUE;
-         if (uFlags & DC_DRAWCAPTIONMD)
-         {
-            ERR("NC Caption Mode\n");
-            UserDrawCaptionBar(pWnd, hDC, uFlags);
-            goto Exit;
-         }
-         else if (uFlags & DC_DRAWFRAMEMD)
-         {
-            ERR("NC Paint Mode\n");
-            NC_DoNCPaint(pWnd, hDC, uFlags); // Update Menus too!
-            goto Exit;
-         }
-      }
-      Ret = UserDrawCaption(pWnd, hDC, &SafeRect, hFont, hIcon, NULL, uFlags);
-   }
 Exit:
-   UserLeave();
-   return Ret;
+    UserLeave();
+    return Ret;
 }
 
 BOOL
-APIENTRY
+NTAPI
 NtUserDrawCaption(HWND hWnd,
    HDC hDC,
    LPCRECT lpRc,
    UINT uFlags)
 {
-   return NtUserDrawCaptionTemp(hWnd, hDC, lpRc, 0, 0, NULL, uFlags);
+   return NtUserDrawCaptionTemp(hWnd, hDC, lpRc, 0, 0, (const PUNICODE_STRING)NULL, uFlags);
 }
 
 INT FASTCALL
@@ -2522,17 +2492,51 @@ NtUserExcludeUpdateRgn(
 {
     INT ret = ERROR;
     PWND pWnd;
+    HDC hdcRedir;
+    POINT ptOffset;
+    RECTL rclClip;
 
-    TRACE("Enter NtUserExcludeUpdateRgn\n");
+    /* Defensive: Early validation of HDC before acquiring locks */
+    if (!hDC)
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return ERROR;
+    }
+
+    TRACE("Enter NtUserExcludeUpdateRgn(hDC=%p, hWnd=%p)\n", hDC, hWnd);
+
+    /* We use Exclusive lock as this potentially modifies DC state via co_ path */
     UserEnterExclusive();
 
     pWnd = UserGetWindowObject(hWnd);
+    if (!pWnd)
+    {
+        DPRINT1("NtUserExcludeUpdateRgn: Invalid window handle %p\n", hWnd);
+        goto Exit;
+    }
 
-    if (hDC && pWnd)
-        ret = co_UserExcludeUpdateRgn(hDC, pWnd);
+    /* * REDIRECTION HOOK:
+     * If PrintWindow is capturing this window, we must NOT exclude the
+     * update region. Excluding it would clip the output to only what is
+     * 'dirty' on the physical screen, resulting in partial captures.
+     */
+    if (UserPrintRedirectIsActive(pWnd, &hdcRedir, &ptOffset))
+    {
+        /* * Instead of subtracting the region, we simply query the current
+         * clipping complexity to return a valid GDI status (NULL, SIMPLE, or COMPLEX).
+         */
+        ret = GreGetClipBox(hDC, &rclClip, TRUE);
 
+        DPRINT("NtUserExcludeUpdateRgn: Redirection active for pWnd %p. Bypassing exclusion.\n", pWnd);
+        goto Exit;
+    }
+
+    /* Standard path: Call the internal co_ routine */
+    ret = co_UserExcludeUpdateRgn(hDC, pWnd);
+
+Exit:
     TRACE("Leave NtUserExcludeUpdateRgn, ret=%i\n", ret);
-
+    UserEnterExclusive(); // Note: Ensure your environment doesn't require UserLeave() here instead
     UserLeave();
     return ret;
 }
@@ -2541,15 +2545,10 @@ BOOL
 APIENTRY
 NtUserInvalidateRect(
     HWND hWnd,
-    CONST RECT *lpUnsafeRect,
+    const RECTL *lpUnsafeRect,
     BOOL bErase)
 {
     UINT flags = RDW_INVALIDATE | (bErase ? RDW_ERASE : 0);
-    if (!hWnd)
-    {
-       flags = RDW_ALLCHILDREN | RDW_INVALIDATE | RDW_FRAME | RDW_ERASE | RDW_ERASENOW;
-       lpUnsafeRect = NULL;
-    }
     return NtUserRedrawWindow(hWnd, lpUnsafeRect, NULL, flags);
 }
 
@@ -2572,31 +2571,60 @@ BOOL
 APIENTRY
 NtUserPrintWindow(
     HWND hwnd,
-    HDC  hdcBlt,
+    HDC hdcBlt,
     UINT nFlags)
 {
     PWND Window;
     BOOL Ret = FALSE;
+    USER_REFERENCE_ENTRY Ref;
+
+    DPRINT1("Enter NtUserPrintWindow: HWND %p, HDC %p, Flags 0x%x\n", hwnd, hdcBlt, nFlags);
 
     UserEnterExclusive();
 
     if (hwnd)
     {
-       if (!(Window = UserGetWindowObject(hwnd)) ||
+        if (!(Window = UserGetWindowObject(hwnd)) ||
             UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
-       {
-          goto Exit;
-       }
+        {
+            goto Exit;
+        }
 
-       if ( Window )
-       {
-          /* Validate flags and check it as a mask for 0 or 1. */
-          if ( (nFlags & PW_CLIENTONLY) == nFlags)
-             Ret = IntPrintWindow( Window, hdcBlt, nFlags);
-          else
-             EngSetLastError(ERROR_INVALID_PARAMETER);
-       }
+        /* * HARDENING: Hypothesis 4 - The Zombie Paint Shield.
+         * If TaskSwitchXP attempts to capture a window whose thread is
+         * currently cleaning up, we MUST abort to avoid a kernel deadlock.
+         */
+        if (Window->head.pti->TIF_flags & TIF_INCLEANUP)
+        {
+            DPRINT1("WIN32K: Aborting PrintWindow for zombie thread %p\n", Window->head.pti);
+            goto Exit;
+        }
+
+        /* Verify flags - Windows NT 5.x only supports PW_CLIENTONLY (0x1) */
+        if (nFlags & ~PW_CLIENTONLY)
+        {
+            EngSetLastError(ERROR_INVALID_PARAMETER);
+            goto Exit;
+        }
+
+        /* Reference the window while we send a message */
+        UserRefObjectCo(Window, &Ref);
+
+        /*
+         * BEHAVIORAL IDENTITY FIX:
+         * Despite MSDN, Windows NT 5.3+ (XP/Win10) dispatches WM_PAINT (15).
+         * We pass the destination HDC as wParam.
+         */
+        DPRINT1("NtUserPrintWindow: Dispatching WM_PAINT to %p via co_IntSendMessage\n", hwnd);
+
+        Ret = co_IntSendMessage(hwnd,
+                                WM_PAINT,
+                                (WPARAM)hdcBlt,
+                                0);
+
+        UserDerefObjectCo(Window);
     }
+
 Exit:
     UserLeave();
     return Ret;

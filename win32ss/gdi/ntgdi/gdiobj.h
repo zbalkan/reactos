@@ -199,3 +199,13 @@ BOOL    NTAPI GDIOBJ_ConvertFromStockObj(HGDIOBJ *phObj);
 POBJ    NTAPI GDIOBJ_AllocObjWithHandle(ULONG ObjectType, ULONG cjSize);
 PGDIOBJ NTAPI GDIOBJ_ShareLockObj(HGDIOBJ hObj, DWORD ObjectType);
 PVOID   NTAPI GDI_MapHandleTable(PEPROCESS Process);
+
+BOOL
+FASTCALL
+GreSafeSetDCOwner(
+    _In_ HDC hdc,
+    _In_ ULONG ulOwner);
+
+/* Region bounding box query - Internal Graphics Engine */
+extern INT APIENTRY GreGetRgnBox(HRGN hrgn, LPRECT prcl);
+extern INT APIENTRY GreGetClipBox(HDC hdc, PRECTL lprc, BOOL fXForm);

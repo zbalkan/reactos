@@ -8,6 +8,10 @@
 
 #include <win32k.h>
 #include <immdev.h>
+
+//#define NDEBUG
+#include <debug.h>
+
 DBG_DEFAULT_CHANNEL(UserWinpos);
 
 /* GLOBALS *******************************************************************/
@@ -136,6 +140,12 @@ IntGetWindowRect(PWND Wnd, RECTL *Rect)
        Rect->right = GetSystemMetrics(SM_CXSCREEN);
        Rect->bottom = GetSystemMetrics(SM_CYSCREEN);
 */   }
+
+   if (Rect->right == Rect->left || Rect->bottom == Rect->top)
+   {
+       DPRINT1("IntGetWindowRect: Warning! Empty Rect for PWND %p [%d, %d, %d, %d]\n",
+               Wnd, Rect->left, Rect->top, Rect->right, Rect->bottom);
+   }
    return TRUE;
 }
 
@@ -263,7 +273,7 @@ SelectWindowRgn(PWND Window, HRGN hRgnClip)
         /* Delete no longer needed region handle */
         IntGdiSetRegionOwner(Window->hrgnClip, GDI_OBJ_HMGR_POWNED);
         GreDeleteObject(Window->hrgnClip);
-        Window->hrgnClip = NULL;       
+        Window->hrgnClip = NULL;
     }
 
     if (hRgnClip > HRGN_WINDOW)
@@ -915,7 +925,7 @@ UserGetWindowBorders(DWORD Style, DWORD ExStyle, SIZE *Size, BOOL WithClient)
 
 //
 // Fix CORE-5177
-// See winetests:user32:win.c:wine_AdjustWindowRectEx, 
+// See winetests:user32:win.c:wine_AdjustWindowRectEx,
 // Simplified version.
 //
 DWORD IntGetWindowBorders(DWORD Style, DWORD ExStyle)
@@ -2274,7 +2284,7 @@ co_WinPosSetWindowPos(
 
    if ( !PosChanged &&
          (WinPos.flags & SWP_FRAMECHANGED) &&
-        !(WinPos.flags & SWP_DEFERERASE) &&    // Prevent sending WM_SYNCPAINT message. 
+        !(WinPos.flags & SWP_DEFERERASE) &&    // Prevent sending WM_SYNCPAINT message.
          VisAfter )
    {
        PWND Parent = Window->spwndParent;
@@ -3579,6 +3589,11 @@ NtUserSetWindowPos(
    if (!(Window = UserGetWindowObject(hWnd)) ||
         UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
    {
+            /* Instrument this line! */
+        DPRINT1("SWP: Bad Handle %p from PID %u. This is why PrintWindow fails.\n",
+                hWnd, (ULONG)(UINT_PTR)PsGetCurrentProcessId());
+        SetLastNtError(ERROR_INVALID_WINDOW_HANDLE);
+        UserLeave();
       ERR("NtUserSetWindowPos bad window handle!\n");
       goto Exit; // Return FALSE
    }
@@ -3955,7 +3970,7 @@ co_IntCalculateSnapPosition(PWND Wnd, UINT Edge, OUT RECT *Pos)
     {
     case HTTOP: /* Maximized (Calculate RECT snap preview for SC_MOVE) */
         height = min(Pos->bottom - Pos->top, maxs.y);
-        break; 
+        break;
     case HTLEFT:
         Pos->right = width;
         break;

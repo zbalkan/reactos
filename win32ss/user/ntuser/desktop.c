@@ -11,6 +11,9 @@
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(UserDesktop);
 
+//#define NDEBUG
+#include <debug.h>
+
 #include <reactos/buildno.h>
 
 static NTSTATUS
@@ -176,6 +179,29 @@ IntDesktopObjectDelete(
     PDESKTOP pdesk = (PDESKTOP)DeleteParameters->Object;
 
     TRACE("Deleting desktop object 0x%p\n", pdesk);
+
+    /* DEFENSIVE: If this is the input desktop, clear the global pointer */
+    if (pdesk == gpdeskInputDesktop)
+    {
+        gpdeskInputDesktop = NULL;
+    }
+
+    /* DEFENSIVE: Disconnect the Active Message Queue */
+    if (pdesk->ActiveMessageQueue)
+    {
+        if (gpqForeground == pdesk->ActiveMessageQueue)
+        {
+            ERR("WIN32K: Clearing gpqForeground because its desktop is being deleted!\n");
+            gpqForeground = NULL;
+        }
+        /* Ensure the hardware-associated threads are no longer pointing here */
+        pdesk->ActiveMessageQueue->ptiMouse = NULL;
+        pdesk->ActiveMessageQueue->ptiKeyboard = NULL;
+        pdesk->ActiveMessageQueue->ptiSysLock = NULL;
+
+        /* Clear the reference on the desktop itself */
+        pdesk->ActiveMessageQueue = NULL;
+    }
 
     if (pdesk->pDeskInfo &&
         pdesk->pDeskInfo->spwnd)
@@ -1337,38 +1363,71 @@ IntSetFocusMessageQueue(PUSER_MESSAGE_QUEUE NewQueue)
 {
     PUSER_MESSAGE_QUEUE Old;
     PDESKTOP pdo = IntGetActiveDesktop();
+
     if (!pdo)
     {
         TRACE("No active desktop\n");
         return;
     }
+
     if (NewQueue != NULL)
     {
-        if (NewQueue->Desktop != NULL)
+        /* * HARDENING: Prevent a 'zombie' queue from taking focus.
+         * If the thread owning this queue is cleaning up, it cannot handle input.
+         */
+        if (NewQueue->ptiSysLock == NULL ||
+            (NewQueue->ptiSysLock->TIF_flags & TIF_INCLEANUP))
+        {
+            ERR("WIN32K: Rejecting focus for dying/zombie Queue %p (pti %p)\n",
+                NewQueue, NewQueue->ptiSysLock);
+            return;
+        }
+
+        if (NewQueue->Desktop != NULL && NewQueue->Desktop != pdo)
         {
             TRACE("Message Queue already attached to another desktop!\n");
             return;
         }
+
         IntReferenceMessageQueue(NewQueue);
         (void)InterlockedExchangePointer((PVOID*)&NewQueue->Desktop, pdo);
+
+        /* * HARDENING: Explicitly re-bind the hardware input threads.
+         * This ensures mouse/keyboard interrupts know exactly which thread to wake.
+         */
+        NewQueue->ptiMouse = NewQueue->ptiSysLock;
+        NewQueue->ptiKeyboard = NewQueue->ptiSysLock;
     }
+
     Old = (PUSER_MESSAGE_QUEUE)InterlockedExchangePointer((PVOID*)&pdo->ActiveMessageQueue, NewQueue);
+
     if (Old != NULL)
     {
+        /* HARDENING: Detach hardware pointers from the old queue immediately */
+        Old->ptiMouse = NULL;
+        Old->ptiKeyboard = NULL;
+
         (void)InterlockedExchangePointer((PVOID*)&Old->Desktop, 0);
         gpqForegroundPrev = Old;
         IntDereferenceMessageQueue(Old);
     }
-    // Only one Q can have active foreground even when there are more than one desktop.
+
+    /* Only one Q can have active foreground system-wide */
     if (NewQueue)
     {
         gpqForeground = pdo->ActiveMessageQueue;
     }
     else
     {
+        /* * If we are clearing focus, ensure hardware tracking is also cleared
+         * to prevent the kernel from sending events to a void.
+         */
         gpqForeground = NULL;
-        ERR("ptiLastInput is CLEARED!!\n");
-        ptiLastInput = NULL; // ReactOS hacks... should check for process death.
+        if (ptiLastInput)
+        {
+            TRACE("IntSetFocusMessageQueue: ptiLastInput 0x%p is CLEARED!!\n", ptiLastInput);
+            ptiLastInput = NULL;
+        }
     }
 }
 
@@ -3466,12 +3525,49 @@ IntSetThreadDesktop(IN HDESK hDesktop,
         ObDereferenceObject(pdeskOld);
     }
 
-    if (pdesk)
+    /* Ensure the desktop and thread objects are valid - No UB allowed */
+    ASSERT(pdesk != NULL);
+    ASSERT(pti != NULL);
+if (pdesk)
     {
         InsertTailList(&pdesk->PtiList, &pti->PtiLink);
+
+        /* * HARDENING: Desktop Focus Promotion
+         * If the desktop has no active queue, promote this thread's queue.
+         * This ensures the desktop has a valid input sink immediately.
+         */
+        if (pdesk->ActiveMessageQueue == NULL)
+        {
+            if (pti->MessageQueue)
+            {
+                TRACE("WIN32K: Promoting pti %p queue to Active for Desktop %p\n", pti, pdesk);
+                IntSetFocusMessageQueue(pti->MessageQueue);
+            }
+        }
+        /* DEFENSIVE: Validate existing ActiveMessageQueue health */
+        else
+        {
+            if (pdesk->ActiveMessageQueue->ptiSysLock == NULL ||
+                (pdesk->ActiveMessageQueue->ptiSysLock->TIF_flags & TIF_INCLEANUP))
+            {
+                ERR("WIN32K: ActiveMessageQueue for Desktop %p is in a zombie state. Recovering with healthy pti %p.\n", pdesk, pti);
+
+                /* Assign the healthy thread to the queue's lock and input pointers */
+                pdesk->ActiveMessageQueue->ptiSysLock = pti;
+                pdesk->ActiveMessageQueue->ptiMouse = pti;
+                pdesk->ActiveMessageQueue->ptiKeyboard = pti;
+
+                /* Global Sync: Ensure the system-wide foreground pointer isn't dangling */
+                if (gpqForeground == NULL) gpqForeground = pdesk->ActiveMessageQueue;
+            }
+        }
     }
 
-    TRACE("IntSetThreadDesktop: pti 0x%p ppi 0x%p switched from object 0x%p to 0x%p\n", pti, pti->ppi, pdeskOld, pdesk);
+    /* Verify state before returning to avoid system-wide hang.
+       Added ptiSysLock NULL check to prevent ASSERT itself from crashing. */
+    ASSERT(pdesk == NULL || IsListEmpty(&pdesk->PtiList) ||
+           (pdesk->ActiveMessageQueue && pdesk->ActiveMessageQueue->ptiSysLock &&
+           !(pdesk->ActiveMessageQueue->ptiSysLock->TIF_flags & TIF_INCLEANUP)));
 
     return TRUE;
 }

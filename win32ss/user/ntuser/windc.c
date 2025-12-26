@@ -9,6 +9,11 @@
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(UserDce);
 
+//#define NDEBUG
+#include <debug.h>
+
+#include "printredir.h"
+
 /* GLOBALS *******************************************************************/
 
 /* NOTE: I think we should store this per window station (including GDI objects) */
@@ -94,6 +99,7 @@ DceAllocDCE(PWND Window OPTIONAL, DCE_TYPE Type)
   pDce->hDC = DceCreateDisplayDC();
   if (!pDce->hDC)
   {
+      DPRINT1("DceAllocDCE: FAILED to create Display DC! GDI Heap may be exhausted.\n");
       ExFreePoolWithTag(pDce, USERTAG_DCE);
       return NULL;
   }
@@ -220,13 +226,15 @@ DceUpdateVisRgn(DCE *Dce, PWND Window, ULONG Flags)
    else if (Window == NULL)
    {
       DesktopWindow = UserGetWindowObject(IntGetDesktopWindow());
-      if (NULL != DesktopWindow)
+     if (NULL != DesktopWindow)
       {
          RgnVisible = IntSysCreateRectpRgnIndirect(&DesktopWindow->rcWindow);
       }
       else
       {
-         RgnVisible = NULL;
+         /* Fallback to primary monitor dimensions if desktop is not yet ready */
+         RgnVisible = IntSysCreateRectpRgn(0, 0, UserGetSystemMetrics(SM_CXSCREEN), UserGetSystemMetrics(SM_CYSCREEN));
+         DPRINT1("DceUpdateVisRgn: DesktopWindow NULL, falling back to screen size.\n");
       }
    }
    else
@@ -275,74 +283,45 @@ noparent:
    }
 }
 
-static INT FASTCALL
-DceReleaseDC(DCE* dce, BOOL EndPaint)
+BOOL FASTCALL
+DceReleaseDC(PWND Window, HDC hDC, BOOL EndPaint)
 {
-   if (DCX_DCEBUSY != (dce->DCXFlags & (DCX_INDESTROY | DCX_DCEEMPTY | DCX_DCEBUSY)))
-   {
-      return 0;
-   }
+    PDCE dce;
+    PLIST_ENTRY ListEntry;
 
-   /* Restore previous visible region */
-   if (EndPaint)
-   {
-      DceUpdateVisRgn(dce, dce->pwndOrg, dce->DCXFlags);
-   }
-
-   if ((dce->DCXFlags & (DCX_INTERSECTRGN | DCX_EXCLUDERGN)) &&
-         ((dce->DCXFlags & DCX_CACHE) || EndPaint))
-   {
-      DceDeleteClipRgn(dce);
-   }
-
-   if (dce->DCXFlags & DCX_CACHE)
-   {
-      if (!(dce->DCXFlags & DCX_NORESETATTRS))
-      {
-         // Clean the DC
-         if (!IntGdiCleanDC(dce->hDC)) return 0;
-
-         if (dce->DCXFlags & DCX_DCEDIRTY)
-         {
-           /* Don't keep around invalidated entries
-            * because SetDCState() disables hVisRgn updates
-            * by removing dirty bit. */
-           dce->hwndCurrent = 0;
-           dce->pwndOrg  = NULL;
-           dce->pwndClip = NULL;
-           dce->DCXFlags &= DCX_CACHE;
-           dce->DCXFlags |= DCX_DCEEMPTY;
-         }
-      }
-      dce->DCXFlags &= ~DCX_DCEBUSY;
-      TRACE("Exit!!!!! DCX_CACHE!!!!!!   hDC-> %p \n", dce->hDC);
-      if (!GreSetDCOwner(dce->hDC, GDI_OBJ_HMGR_NONE))
-         return 0;
-      dce->ptiOwner = NULL; // Reset ownership.
-      dce->ppiOwner = NULL;
-
-#if 0 // Need to research and fix before this is a "growing" issue.
-      if (++DCECache > 32)
-      {
-         ListEntry = LEDce.Flink;
-         while (ListEntry != &LEDce)
-         {
-            pDCE = CONTAINING_RECORD(ListEntry, DCE, List);
-            ListEntry = ListEntry->Flink;
-            if (!(pDCE->DCXFlags & DCX_DCEBUSY))
-            {  /* Free the unused cache DCEs. */
-               DceFreeDCE(pDCE, TRUE);
+    KeEnterCriticalRegion();
+    ListEntry = LEDce.Flink;
+    while (ListEntry != &LEDce)
+    {
+        dce = CONTAINING_RECORD(ListEntry, DCE, List);
+        if (dce->hDC == hDC)
+        {
+            if (!(dce->DCXFlags & DCX_DCEBUSY))
+            {
+                KeLeaveCriticalRegion();
+                return FALSE;
             }
-         }
-      }
-#endif
-   }
-   return 1; // Released!
+            dce->DCXFlags &= ~DCX_DCEBUSY;
+            if (dce->DCXFlags & DCX_CACHE)
+            {
+                if (dce->DCXFlags & (DCX_INTERSECTRGN | DCX_EXCLUDERGN))
+                    DceDeleteClipRgn(dce);
+
+                dce->hwndCurrent = NULL;
+                dce->pwndOrg = dce->pwndClip = NULL;
+                GreSetDCOwner(dce->hDC, GDI_OBJ_HMGR_NONE);
+            }
+            KeLeaveCriticalRegion();
+            return TRUE;
+        }
+        ListEntry = ListEntry->Flink;
+    }
+    KeLeaveCriticalRegion();
+    return FALSE;
 }
 
-
 HDC FASTCALL
-UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
+IntGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
 {
    PWND Parent;
    ULONG DcxFlags;
@@ -563,6 +542,15 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
 
    if (ClipRegion == HRGN_WINDOW)
    {
+      /* HARDENING: Ensure we don't dereference a NULL Wnd */
+      if (Wnd == NULL)
+      {
+          DPRINT1("IntGetDCEx: HRGN_WINDOW requested but Wnd is NULL! Falling back to screen.\n");
+          // If Wnd is NULL, we shouldn't be using HRGN_WINDOW.
+          // Default to NULL clip region or return error.
+          return NULL;
+      }
+
       if (!(Flags & DCX_WINDOW))
       {
          Dce->hrgnClip = NtGdiCreateRectRgn(
@@ -748,7 +736,7 @@ DceFreeWindowDCE(PWND Window)
                * (for 1.0?).
                */
               ERR("[%p] GetDC() without ReleaseDC()!\n", UserHMGetHandle(Window));
-              DceReleaseDC(pDCE, FALSE);
+              DceReleaseDC(Window, pDCE->hDC, FALSE);
            }
            pDCE->DCXFlags |= DCX_DCEEMPTY;
            pDCE->hwndCurrent = 0;
@@ -797,20 +785,6 @@ DceFreeThreadDCE(PTHREADINFO pti)
    }
 }
 
-VOID FASTCALL
-DceEmptyCache(VOID)
-{
-   PDCE pDCE;
-   PLIST_ENTRY ListEntry;
-
-   ListEntry = LEDce.Flink;
-   while (ListEntry != &LEDce)
-   {
-      pDCE = CONTAINING_RECORD(ListEntry, DCE, List);
-      ListEntry = ListEntry->Flink;
-      DceFreeDCE(pDCE, TRUE);
-   }
-}
 
 VOID FASTCALL
 DceResetActiveDCEs(PWND Window)
@@ -914,33 +888,43 @@ IntWindowFromDC(HDC hDc)
   return Ret;
 }
 
-INT FASTCALL
-UserReleaseDC(PWND Window, HDC hDc, BOOL EndPaint)
+/* Complex UserReleaseDC with Print Redirection */
+BOOL FASTCALL
+UserReleaseDC(PWND Window, HDC hDC, BOOL EndPaint)
 {
-  PDCE dce;
-  PLIST_ENTRY ListEntry;
-  INT nRet = 0;
-  BOOL Hit = FALSE;
+    HDC hdcRedirect;
+    POINT pt;
 
-  TRACE("%p %p\n", Window, hDc);
-  ListEntry = LEDce.Flink;
-  while (ListEntry != &LEDce)
-  {
-     dce = CONTAINING_RECORD(ListEntry, DCE, List);
-     ListEntry = ListEntry->Flink;
-     if (dce->hDC == hDc)
-     {
-        Hit = TRUE;
-        break;
-     }
-  }
+    /* New window-centric redirection check */
+    if (UserPrintRedirectIsActive(Window, &hdcRedirect, &pt) && hdcRedirect == hDC)
+    {
+        /* * For redirected DCs, we manage ownership to prevent leaks
+         * but avoid standard DCE destruction paths.
+         */
+        GreSafeSetDCOwner(hDC, GDI_OBJ_HMGR_PUBLIC);
+        return TRUE;
+    }
 
-  if ( Hit && (dce->DCXFlags & DCX_DCEBUSY))
-  {
-     nRet = DceReleaseDC(dce, EndPaint);
-  }
+    return DceReleaseDC(Window, hDC, EndPaint);
+}
 
-  return nRet;
+/* Complex UserGetDCEx with Print Redirection */
+HDC FASTCALL
+UserGetDCEx(PWND Window OPTIONAL, HANDLE hrgnClip, ULONG flags)
+{
+    HDC hdc;
+    POINT ptOffset;
+
+    /* Check window properties for active redirection frames */
+    if (Window && UserPrintRedirectIsActive(Window, &hdc, &ptOffset))
+    {
+        /* Ensure the redirected DC's origin matches the window's current position */
+        DceSetDrawable(Window, hdc, flags, TRUE);
+        return hdc;
+    }
+
+    /* Fallback to standard DC allocation if no redirection is active */
+    return IntGetDCEx(Window, hrgnClip, flags);
 }
 
 HDC FASTCALL
@@ -1007,14 +991,15 @@ Exit:
 HDC APIENTRY
 NtUserGetWindowDC(HWND hWnd)
 {
+  DPRINT1("NtUserGetWindowDC called for HWND %p\n", hWnd);
   return NtUserGetDCEx(hWnd, 0, DCX_USESTYLE | DCX_WINDOW);
 }
 
 HDC APIENTRY
 NtUserGetDC(HWND hWnd)
 {
- TRACE("NtUGetDC -> %p:%x\n", hWnd, !hWnd ? DCX_CACHE | DCX_WINDOW : DCX_USESTYLE);
-
+  TRACE("NtUGetDC -> %p:%x\n", hWnd, !hWnd ? DCX_CACHE | DCX_WINDOW : DCX_USESTYLE);
+  DPRINT1("NtUserGetDC called for HWND %p\n", hWnd);
   return NtUserGetDCEx(hWnd, NULL, NULL == hWnd ? DCX_CACHE | DCX_WINDOW : DCX_USESTYLE);
 }
 

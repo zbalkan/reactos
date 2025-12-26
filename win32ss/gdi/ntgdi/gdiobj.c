@@ -47,7 +47,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <win32k.h>
-#define NDEBUG
+//#define NDEBUG
 #include <debug.h>
 
 FORCEINLINE
@@ -1666,4 +1666,152 @@ GetBrushAttrPool(VOID)
     return ppi->pPoolBrushAttr;
 }
 
+/**
+ * @name GreSafeSetDCOwner
+ * @brief Safely sets DC ownership using NT 5.3 handle table logic.
+ *
+ * @param hdc      Handle to the Device Context.
+ * @param ulOwner  Ownership type (GDI_OBJ_HMGR_PUBLIC, etc.)
+ */
+BOOL
+FASTCALL
+GreSafeSetDCOwner(HDC hdc, ULONG ulOwner)
+{
+    ULONG ulIndex;
+
+    /* 1. Basic validation */
+    if (!hdc) return FALSE;
+
+    /* 2. Index Calculation (using your ntgdihdl.h macro) */
+    ulIndex = GDI_HANDLE_GET_INDEX(hdc);
+
+    /* 3. Safety Check: Is the handle valid?
+     * We must check the valid bit (bit 23) in the global reference count array.
+     * If bit 23 is 0, the handle is a zombie or deleted.
+     */
+    if (!(gpaulRefCount[ulIndex] & 0x00800000))
+    {
+        DPRINT("GreSafeSetDCOwner: Handle %p is invalid or a zombie.\n", hdc);
+        return FALSE;
+    }
+
+    /* 4. Type Check: Ensure it is a DC (using your ntgdihdl.h macros)
+     * GDI_HANDLE_GET_TYPE extracts the type bits.
+     * GDI_OBJECT_TYPE_DC is defined as 0x00010000.
+     */
+    if (GDI_HANDLE_GET_TYPE(hdc) != GDI_OBJECT_TYPE_DC)
+    {
+        DPRINT1("GreSafeSetDCOwner: Handle %p is not a DC (Type: 0x%lx)\n",
+                hdc, GDI_HANDLE_GET_TYPE(hdc));
+        return FALSE;
+    }
+
+    /* 5. Engine Call
+     * GreSetDCOwner is the engine function that updates pentry->ObjectOwner.ulObj
+     * and adjusts the Win32Process GDI object quota.
+     */
+    return GreSetDCOwner(hdc, ulOwner);
+}
+
+/**
+ * @name GreGetRgnBox
+ * @brief Retrieves the bounding box of a region.
+ */
+INT
+APIENTRY
+GreGetRgnBox(
+    HRGN hrgn,
+    LPRECT prcl)
+{
+    PREGION pRgn;
+    INT Complexity = ERROR;
+
+    if (!prcl) return ERROR;
+
+    if (hrgn == NULL)
+    {
+        prcl->left = prcl->top = prcl->right = prcl->bottom = 0;
+        return NULLREGION;
+    }
+
+    pRgn = REGION_LockRgn(hrgn);
+    if (pRgn)
+    {
+        /* Access boundary via RGNDATAHEADER as per structure definition */
+        prcl->left   = pRgn->rdh.rcBound.left;
+        prcl->top    = pRgn->rdh.rcBound.top;
+        prcl->right  = pRgn->rdh.rcBound.right;
+        prcl->bottom = pRgn->rdh.rcBound.bottom;
+
+        if (pRgn->rdh.nCount == 0)
+        {
+            Complexity = NULLREGION;
+            prcl->left = prcl->top = prcl->right = prcl->bottom = 0;
+        }
+        else
+        {
+            Complexity = (pRgn->rdh.nCount == 1) ? SIMPLEREGION : COMPLEXREGION;
+        }
+        REGION_UnlockRgn(pRgn);
+    }
+    else
+    {
+        prcl->left = prcl->top = prcl->right = prcl->bottom = 0;
+        Complexity = ERROR;
+    }
+
+    return Complexity;
+}
+
+/**
+ * @name GreGetClipBox
+ * @brief Retrieves the bounding box of the DC's current clipping region.
+ */
+INT
+APIENTRY
+GreGetClipBox(HDC hdc, PRECTL lprc, BOOL fXForm)
+{
+    PDC pdc;
+    INT Ret = ERROR;
+
+    if (!lprc) return ERROR;
+
+    pdc = DC_LockDc(hdc);
+    if (pdc)
+    {
+        /* * Logic: Use prgnAPI if the user has set a clipping region.
+         * Otherwise, the clipping box is defined by the Visible Region (prgnVis).
+         */
+        if (pdc->prgnAPI)
+        {
+            /* Use our new GreGetRgnBox to get the bounding box of the API region */
+            Ret = GreGetRgnBox(pdc->prgnAPI->BaseObject.hHmgr, lprc);
+        }
+        else if (pdc->prgnVis)
+        {
+            /* Fallback to the visible region boundary */
+            Ret = GreGetRgnBox(pdc->prgnVis->BaseObject.hHmgr, lprc);
+        }
+        else
+        {
+            /* Fallback to the DC's internal cached clipping rectangle */
+            *lprc = pdc->erclClip;
+            Ret = SIMPLEREGION;
+        }
+
+        /* * Note: fXForm handling would go here for coordinate transformation,
+         * but for the initial PrintWindow implementation, device coordinates
+         * are usually sufficient.
+         */
+
+        DC_UnlockDc(pdc);
+    }
+    else
+    {
+        /* Handle could not be locked */
+        lprc->left = lprc->top = lprc->right = lprc->bottom = 0;
+    }
+
+    return Ret;
+}
 /* EOF */

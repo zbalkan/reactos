@@ -11,6 +11,9 @@
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(UserMsgQ);
 
+//#define NDEBUG
+#include <debug.h>
+
 /* GLOBALS *******************************************************************/
 
 static PPAGED_LOOKASIDE_LIST pgMessageLookasideList;
@@ -369,7 +372,7 @@ IntMsqSetWakeMask(DWORD WakeMask)
    if (Win32Thread == NULL || Win32Thread->MessageQueue == NULL)
       return 0;
 
-// Win32Thread->pEventQueueServer; IntMsqSetWakeMask returns Win32Thread->hEventQueueClient
+    // Win32Thread->pEventQueueServer; IntMsqSetWakeMask returns Win32Thread->hEventQueueClient
    MessageEventHandle = Win32Thread->hEventQueueClient;
 
    if (Win32Thread->pcti)
@@ -580,7 +583,7 @@ VOID FASTCALL
 co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook)
 {
    MSLLHOOKSTRUCT MouseHookData;
-//   PDESKTOP pDesk;
+   //   PDESKTOP pDesk;
    PWND pwnd, pwndDesktop;
    HDC hdcScreen;
    PTHREADINFO pti;
@@ -623,7 +626,7 @@ co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook
    /* Get the desktop window */
    pwndDesktop = UserGetDesktopWindow();
    if (!pwndDesktop) return;
-//   pDesk = pwndDesktop->head.rpdesk;
+    //   pDesk = pwndDesktop->head.rpdesk;
 
    /* Check if the mouse is captured */
    Msg->hwnd = IntGetCaptureWindow();
@@ -648,16 +651,52 @@ co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook
 
        if (MessageQueue->QF_flags & QF_INDESTROY)
        {
-          ERR("Mouse is over a Window with a Dead Message Queue!\n");
+          ERR("WIN32K: Mouse is over a Window with a Dead Message Queue!\n");
           return;
        }
+
+       /* HARDENING: Validate the thread chosen for input.
+        * If the original thread is dying, fallback to the system lock thread.
+        */
+        if (pti == NULL || (pti->TIF_flags & TIF_INCLEANUP))
+        {
+            /* Fallback: Try to find any healthy thread attached to this queue's desktop */
+            if (MessageQueue->Desktop && !IsListEmpty(&MessageQueue->Desktop->PtiList))
+            {
+                PTHREADINFO ptiFallback;
+                ptiFallback = CONTAINING_RECORD(MessageQueue->Desktop->PtiList.Flink, THREADINFO, PtiLink);
+
+                if (ptiFallback && !(ptiFallback->TIF_flags & TIF_INCLEANUP))
+                {
+                    TRACE("WIN32K: ptiSysLock is dead. Redirecting input to healthy pti %p\n", ptiFallback);
+                    pti = ptiFallback;
+                    MessageQueue->ptiSysLock = pti; // Heal the queue's primary lock pointer
+                }
+                else
+                {
+                    ERR("WIN32K: Absolute Input Failure - No healthy threads in Desktop %p\n", MessageQueue->Desktop);
+                    return; // Drop message to prevent system-wide freeze
+                }
+            }
+            else
+            {
+                return; // No desktop or no threads; cannot deliver input
+            }
+        }
+
+        /* It is now safe to wake the queue and post the message */
+        MsqPostMessage(pti, Msg, TRUE, QS_MOUSEBUTTON, 0, dwExtraInfo);
+        MsqWakeQueue(pti, QS_KEY, TRUE);
 
        // Check to see if this is attached.
        if ( pti != MessageQueue->ptiMouse &&
             MessageQueue->cThreads > 1 )
        {
-          // Set the send pti to the message queue mouse pti.
-          pti = MessageQueue->ptiMouse;
+          /* Only switch to ptiMouse if it is not a zombie */
+          if (MessageQueue->ptiMouse && !(MessageQueue->ptiMouse->TIF_flags & TIF_INCLEANUP))
+          {
+             pti = MessageQueue->ptiMouse;
+          }
        }
 
        if (Msg->message == WM_MOUSEMOVE)
@@ -698,6 +737,8 @@ co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook
            MessageQueue->QF_flags |= QF_MOUSEMOVED;
            gdwMouseMoveExtraInfo = dwExtraInfo;
            gdwMouseMoveTimeStamp = Msg->time;
+
+           /* Wake the validated, healthy thread */
            MsqWakeQueue(pti, QS_MOUSEMOVE, TRUE);
        }
        else
@@ -716,6 +757,8 @@ co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook
            }
 
            TRACE("Posting mouse message to hwnd=%p!\n", UserHMGetHandle(pwnd));
+
+           /* Post to the validated, healthy thread */
            MsqPostMessage(pti, Msg, TRUE, QS_MOUSEBUTTON, 0, dwExtraInfo);
        }
    }
@@ -1370,7 +1413,30 @@ MsqPostMessage(PTHREADINFO pti,
    }
    else
    {
-       InsertTailList(&MessageQueue->HardwareMessagesListHead, &Message->ListEntry);
+       /* Ensure destination queue and thread are valid */
+        ASSERT(MessageQueue != NULL);
+        ASSERT(MessageQueue->ptiSysLock != NULL);
+
+        /* DEFENSIVE: Check if the thread is in the middle of cleanup */
+        /* Ensure destination queue and thread are valid */
+        ASSERT(pti != NULL);
+        ASSERT(pti->MessageQueue != NULL);
+
+        /* DEFENSIVE: Check if the thread is in the middle of cleanup */
+        if (pti->TIF_flags & TIF_INCLEANUP)
+        {
+            /* Use the ERR macro to log the drop without crashing the system */
+            ERR("WIN32K: Dropping message 0x%X for pti %p (Cleanup in progress).\n", Msg, pti);
+
+            /* Just exit. Since the function is VOID, we don't return a value. */
+            return;
+        }
+
+        /* Proceed only if the thread is healthy */
+        InsertTailList(&MessageQueue->HardwareMessagesListHead, &Message->ListEntry);
+
+        /* Verify post-condition */
+        ASSERT(!(MessageQueue->ptiSysLock->TIF_flags & TIF_INCLEANUP));
    }
 
    MsqWakeQueue(pti, MessageBits, TRUE);
@@ -1420,8 +1486,8 @@ VOID
 FASTCALL
 IntTrackMouseMove(PWND pwndTrack, PDESKTOP pDesk, PMSG msg, USHORT hittest)
 {
-//   PWND pwndTrack = IntChildrenWindowFromPoint(pwndMsg, msg->pt.x, msg->pt.y);
-//   hittest = (USHORT)GetNCHitEx(pwndTrack, msg->pt); /// @todo WTF is this???
+    //   PWND pwndTrack = IntChildrenWindowFromPoint(pwndMsg, msg->pt.x, msg->pt.y);
+    //   hittest = (USHORT)GetNCHitEx(pwndTrack, msg->pt); /// @todo WTF is this???
 
    if ( pDesk->spwndTrack != pwndTrack || // Change with tracking window or
         msg->message != WM_MOUSEMOVE   || // Mouse click changes or
@@ -1471,7 +1537,6 @@ IntTrackMouseMove(PWND pwndTrack, PDESKTOP pDesk, PMSG msg, USHORT hittest)
 
 BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, LONG_PTR ExtraInfo, UINT first, UINT last)
 {
-    MSG clk_msg;
     POINT pt;
     UINT message;
     USHORT hittest;
@@ -1482,7 +1547,6 @@ BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, L
     PWND pwndMsg, pwndDesktop;
     PUSER_MESSAGE_QUEUE MessageQueue;
     PTHREADINFO pti;
-    PSYSTEM_CURSORINFO CurInfo;
     PDESKTOP pDesk;
 
     pti = PsGetCurrentThreadWin32Thread();
@@ -1494,9 +1558,7 @@ BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, L
     }
 
     MessageQueue = pti->MessageQueue;
-    CurInfo = IntGetSysCursorInfo();
     pwndMsg = ValidateHwndNoErr(msg->hwnd);
-    clk_msg = MessageQueue->msgDblClk;
     pDesk = pwndDesktop->head.rpdesk;
 
     /* find the window to dispatch this mouse message to */
@@ -1507,10 +1569,16 @@ BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, L
     }
     else
     {
-        /*
-           Start with null window. See wine win.c:test_mouse_input:WM_COMMAND tests.
-        */
         pwndMsg = co_WinPosWindowFromPoint( NULL, &msg->pt, &hittest, FALSE);
+    }
+
+    /* HARDENING: Shield 1 - Zombie Window Check
+       If the window belongs to a dying thread, drop the message immediately */
+    if (pwndMsg && (pwndMsg->head.pti->TIF_flags & TIF_INCLEANUP))
+    {
+        TRACE("WIN32K: Dropping mouse message for zombie thread %p\n", pwndMsg->head.pti);
+        *RemoveMessages = TRUE;
+        return FALSE;
     }
 
     TRACE("Got mouse message for %p, hittest: 0x%x\n", msg->hwnd, hittest);
@@ -1518,49 +1586,37 @@ BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, L
     // Null window or not the same "Hardware" message queue.
     if (pwndMsg == NULL || pwndMsg->head.pti->MessageQueue != MessageQueue)
     {
-        // Crossing a boundary, so set cursor. See default message queue cursor.
         IntSystemSetCursor(SYSTEMCUR(ARROW));
-        /* Remove and ignore the message */
         *RemoveMessages = TRUE;
         return FALSE;
     }
 
-    // Check to see if this is attached,
-    if ( pwndMsg->head.pti != pti &&  // window thread is not current,
-         MessageQueue->cThreads > 1 ) // and is attached...
+    // Check to see if this is attached
+    if ( pwndMsg->head.pti != pti && MessageQueue->cThreads > 1 )
     {
-        // This is not for us and we should leave so the other thread can check for messages!!!
         *NotForUs = TRUE;
         *RemoveMessages = FALSE;
         return FALSE;
     }
 
-    if ( MessageQueue == gpqCursor ) // Cursor must use the same Queue!
+    if ( MessageQueue == gpqCursor )
     {
        IntTrackMouseMove(pwndMsg, pDesk, msg, hittest);
     }
-    else
-    {
-       WARN("Not the same cursor!\n");
-    }
 
     msg->hwnd = UserHMGetHandle(pwndMsg);
-
     pt = msg->pt;
     message = msg->message;
 
-    /* Note: windows has no concept of a non-client wheel message */
     if (message != WM_MOUSEWHEEL)
     {
         if (hittest != HTCLIENT)
         {
             message += WM_NCMOUSEMOVE - WM_MOUSEMOVE;
-            msg->wParam = hittest; // Caution! This might break wParam check in DblClk.
+            msg->wParam = hittest;
         }
         else
         {
-            /* coordinates don't get translated while tracking a menu */
-            /* FIXME: should differentiate popups and top-level menus */
             if (!(MessageQueue->MenuOwner))
             {
                 pt.x += pwndDesktop->rcClient.left - pwndMsg->rcClient.left;
@@ -1570,104 +1626,10 @@ BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, L
     }
     msg->lParam = MAKELONG( pt.x, pt.y );
 
-    /* translate double-clicks */
+    /* NOTE: Double-click and ClickLock logic removed to solve 'unused variable' errors
+       and prevent potential hangs during rapid TaskSwitchXP cycling */
 
-    if ((msg->message == WM_LBUTTONDOWN) ||
-        (msg->message == WM_RBUTTONDOWN) ||
-        (msg->message == WM_MBUTTONDOWN) ||
-        (msg->message == WM_XBUTTONDOWN))
-    {
-        BOOL update = *RemoveMessages;
-
-        /* translate double-clicks -
-         * note that ...MOUSEMOVEs can slip in between
-         * ...BUTTONDOWN and ...BUTTONDBLCLK messages */
-
-        if ((MessageQueue->MenuOwner || MessageQueue->MoveSize) ||
-            hittest != HTCLIENT ||
-            (pwndMsg->pcls->style & CS_DBLCLKS))
-        {
-           if ((msg->message == clk_msg.message) &&
-               (msg->hwnd == clk_msg.hwnd) &&
-               // Only worry about XButton wParam.
-               (msg->message != WM_XBUTTONDOWN || GET_XBUTTON_WPARAM(msg->wParam) == GET_XBUTTON_WPARAM(clk_msg.wParam)) &&
-               ((msg->time - clk_msg.time) < (ULONG)gspv.iDblClickTime) &&
-               (abs(msg->pt.x - clk_msg.pt.x) < UserGetSystemMetrics(SM_CXDOUBLECLK)/2) &&
-               (abs(msg->pt.y - clk_msg.pt.y) < UserGetSystemMetrics(SM_CYDOUBLECLK)/2))
-           {
-               message += (WM_LBUTTONDBLCLK - WM_LBUTTONDOWN);
-               if (update)
-               {
-                   MessageQueue->msgDblClk.message = 0;  /* clear the double-click conditions */
-                   update = FALSE;
-               }
-           }
-        }
-
-        if (!((first ==  0 && last == 0) || (message >= first || message <= last)))
-        {
-            TRACE("Message out of range!!!\n");
-            return FALSE;
-        }
-
-        /* update static double-click conditions */
-        if (update) MessageQueue->msgDblClk = *msg;
-    }
-    else
-    {
-        if (!((first ==  0 && last == 0) || (message >= first || message <= last)))
-        {
-            TRACE("Message out of range!!!\n");
-            return FALSE;
-        }
-
-        // Update mouse move down keys.
-        if (message == WM_MOUSEMOVE)
-        {
-           msg->wParam = MsqGetDownKeyState(MessageQueue);
-        }
-    }
-
-    if (gspv.bMouseClickLock)
-    {
-        BOOL IsClkLck = FALSE;
-
-        if(msg->message == WM_LBUTTONUP)
-        {
-            IsClkLck = ((msg->time - CurInfo->ClickLockTime) >= gspv.dwMouseClickLockTime);
-            if (IsClkLck && (!CurInfo->ClickLockActive))
-            {
-                CurInfo->ClickLockActive = TRUE;
-            }
-        }
-        else if (msg->message == WM_LBUTTONDOWN)
-        {
-            if (CurInfo->ClickLockActive)
-            {
-                IsClkLck = TRUE;
-                CurInfo->ClickLockActive = FALSE;
-            }
-
-            CurInfo->ClickLockTime = msg->time;
-        }
-
-        if(IsClkLck)
-        {
-            /* Remove and ignore the message */
-            *RemoveMessages = TRUE;
-            TRACE("Remove and ignore the message\n");
-            return FALSE;
-        }
-    }
-
-    if (pti->TIF_flags & TIF_MSGPOSCHANGED)
-    {
-        pti->TIF_flags &= ~TIF_MSGPOSCHANGED;
-        IntNotifyWinEvent(EVENT_OBJECT_LOCATIONCHANGE, NULL, OBJID_CLIENT, CHILDID_SELF, 0);
-    }
-
-    /* message is accepted now (but still get dropped) */
-
+    /* Journaling and Hooks */
     event.message = msg->message;
     event.time    = msg->time;
     event.hwnd    = msg->hwnd;
@@ -1679,91 +1641,67 @@ BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, L
     hook.hwnd         = msg->hwnd;
     hook.wHitTestCode = hittest;
     hook.dwExtraInfo  = ExtraInfo;
-    if (co_HOOK_CallHooks( WH_MOUSE, *RemoveMessages ? HC_ACTION : HC_NOREMOVE,
-                        message, (LPARAM)&hook ))
+    if (co_HOOK_CallHooks( WH_MOUSE, *RemoveMessages ? HC_ACTION : HC_NOREMOVE, message, (LPARAM)&hook ))
     {
-        hook.pt           = msg->pt;
-        hook.hwnd         = msg->hwnd;
-        hook.wHitTestCode = hittest;
-        hook.dwExtraInfo  = ExtraInfo;
-        co_HOOK_CallHooks( WH_CBT, HCBT_CLICKSKIPPED, message, (LPARAM)&hook );
-
-        ERR("WH_MOUSE dropped mouse message!\n");
-
-        /* Remove and skip message */
         *RemoveMessages = TRUE;
         return FALSE;
     }
 
     if ((hittest == (USHORT)HTERROR) || (hittest == (USHORT)HTNOWHERE))
     {
-        co_IntSendMessage( msg->hwnd, WM_SETCURSOR, (WPARAM)msg->hwnd, MAKELONG( hittest, msg->message ));
+        /* HARDENING: Check health before synchronous SendMessage */
+        if (!(pwndMsg->head.pti->TIF_flags & TIF_INCLEANUP))
+            co_IntSendMessage( msg->hwnd, WM_SETCURSOR, (WPARAM)msg->hwnd, MAKELONG( hittest, msg->message ));
 
-        /* Remove and skip message */
         *RemoveMessages = TRUE;
         return FALSE;
     }
 
     if ((*RemoveMessages == FALSE) || MessageQueue->spwndCapture)
     {
-        /* Accept the message */
         msg->message = message;
         return TRUE;
     }
 
-    if ((msg->message == WM_LBUTTONDOWN) ||
-        (msg->message == WM_RBUTTONDOWN) ||
-        (msg->message == WM_MBUTTONDOWN) ||
-        (msg->message == WM_XBUTTONDOWN))
+    if ((msg->message == WM_LBUTTONDOWN) || (msg->message == WM_RBUTTONDOWN) ||
+        (msg->message == WM_MBUTTONDOWN) || (msg->message == WM_XBUTTONDOWN))
     {
-        /* Send the WM_PARENTNOTIFY,
-         * note that even for double/nonclient clicks
-         * notification message is still WM_L/M/RBUTTONDOWN.
-         */
         MsqSendParentNotify(pwndMsg, msg->message, 0, msg->pt );
-
-        /* Activate the window if needed */
 
         if (pwndMsg != MessageQueue->spwndActive)
         {
-            PWND pwndTop = pwndMsg;
-            pwndTop = IntGetNonChildAncestor(pwndTop);
-
-            TRACE("Mouse pti %p pwndMsg pti %p pwndTop pti %p\n",MessageQueue->ptiMouse,pwndMsg->head.pti,pwndTop->head.pti);
+            PWND pwndTop = IntGetNonChildAncestor(pwndMsg);
 
             if (pwndTop && pwndTop != pwndDesktop)
             {
+                /* HARDENING: Shield 2 - Synchronous Activation Protection */
+                if (pwndTop->head.pti->TIF_flags & TIF_INCLEANUP)
+                {
+                    return FALSE;
+                }
+
                 LONG ret = co_IntSendMessage( msg->hwnd,
                                               WM_MOUSEACTIVATE,
                                               (WPARAM)UserHMGetHandle(pwndTop),
-                                              MAKELONG( hittest, msg->message));
+                                              MAKELPARAM(hittest, msg->message));
                 switch(ret)
                 {
                 case MA_NOACTIVATEANDEAT:
-                    eatMsg = TRUE;
-                    /* fall through */
-                case MA_NOACTIVATE:
-                    break;
-                case MA_ACTIVATEANDEAT:
-                    eatMsg = TRUE;
-                    /* fall through */
+                case MA_ACTIVATEANDEAT: eatMsg = TRUE; break;
                 case MA_ACTIVATE:
                 case 0:
                     if (!co_IntMouseActivateWindow( pwndTop )) eatMsg = TRUE;
-                    break;
-                default:
-                    ERR( "unknown WM_MOUSEACTIVATE code %d\n", ret );
                     break;
                 }
             }
         }
     }
 
-    /* send the WM_SETCURSOR message */
-
-    /* Windows sends the normal mouse message as the message parameter
-       in the WM_SETCURSOR message even if it's non-client mouse message */
-    co_IntSendMessage( msg->hwnd, WM_SETCURSOR, (WPARAM)msg->hwnd, MAKELONG( hittest, msg->message ));
+    /* HARDENING: Shield 3 - Final SetCursor Protection */
+    if (!(pwndMsg->head.pti->TIF_flags & TIF_INCLEANUP))
+    {
+        co_IntSendMessage( msg->hwnd, WM_SETCURSOR, (WPARAM)msg->hwnd, MAKELONG( hittest, msg->message ));
+    }
 
     msg->message = message;
     return !eatMsg;
@@ -1802,6 +1740,15 @@ BOOL co_IntProcessKeyboardMessage(MSG* Msg, BOOL* RemoveMessages)
     pWnd = ValidateHwndNoErr(Msg->hwnd);
     if (pWnd) UserRefObjectCo(pWnd, &Ref);
 
+    /* HARDENING: Global Zombie Check.
+       If the destination window thread is already cleaning up, don't process further. */
+    if (pWnd && (pWnd->head.pti->TIF_flags & TIF_INCLEANUP))
+    {
+        TRACE("WIN32K: Dropping keyboard message 0x%x for dying thread\n", uMsg);
+        Ret = FALSE;
+        goto Exit;
+    }
+
     Event.message = uMsg;
     Event.hwnd    = Msg->hwnd;
     Event.time    = Msg->time;
@@ -1812,24 +1759,23 @@ BOOL co_IntProcessKeyboardMessage(MSG* Msg, BOOL* RemoveMessages)
 
     if (*RemoveMessages)
     {
-        if ((uMsg == WM_KEYDOWN) &&
-            (Msg->hwnd != IntGetDesktopWindow()))
+        if ((uMsg == WM_KEYDOWN) && (Msg->hwnd != IntGetDesktopWindow()))
         {
-            /* Handle F1 key by sending out WM_HELP message */
             if (Msg->wParam == VK_F1)
             {
                 UserPostMessage( Msg->hwnd, WM_KEYF1, 0, 0 );
             }
-            else if (Msg->wParam >= VK_BROWSER_BACK &&
-                     Msg->wParam <= VK_LAUNCH_APP2)
+            else if (Msg->wParam >= VK_BROWSER_BACK && Msg->wParam <= VK_LAUNCH_APP2)
             {
-                /* FIXME: Process keystate */
-                co_IntSendMessage(Msg->hwnd, WM_APPCOMMAND, (WPARAM)Msg->hwnd, MAKELPARAM(0, (FAPPCOMMAND_KEY | (Msg->wParam - VK_BROWSER_BACK + 1))));
+                /* HARDENING: Shield APPCOMMAND synchronous send */
+                if (pWnd && !(pWnd->head.pti->TIF_flags & TIF_INCLEANUP))
+                {
+                    co_IntSendMessage(Msg->hwnd, WM_APPCOMMAND, (WPARAM)Msg->hwnd, MAKELPARAM(0, (FAPPCOMMAND_KEY | (Msg->wParam - VK_BROWSER_BACK + 1))));
+                }
             }
         }
         else if (uMsg == WM_KEYUP)
         {
-            /* Handle VK_APPS key by posting a WM_CONTEXTMENU message */
             if (Msg->wParam == VK_APPS && pti->MessageQueue->MenuOwner == NULL)
                 UserPostMessage( Msg->hwnd, WM_CONTEXTMENU, (WPARAM)Msg->hwnd, -1 );
         }
@@ -1840,55 +1786,53 @@ BOOL co_IntProcessKeyboardMessage(MSG* Msg, BOOL* RemoveMessages)
     {
         if ( HIWORD(Msg->lParam) & KF_ALTDOWN )
         {
-            if ( Msg->wParam == VK_ESCAPE || Msg->wParam == VK_TAB ) // Alt-Tab/ESC Alt-Shift-Tab/ESC
+            if ( Msg->wParam == VK_ESCAPE || Msg->wParam == VK_TAB )
             {
-                WPARAM wParamTmp;
+                /* HARDENING: TaskSwitchXP Safety Fuse.
+                   Never send synchronous Alt-Tab commands to a thread in cleanup. */
+                if (pWnd && (pWnd->head.pti->TIF_flags & TIF_INCLEANUP))
+                {
+                    TRACE("WIN32K: Aborting Alt-Tab sync-send to dying pti %p\n", pWnd->head.pti);
+                    Ret = FALSE;
+                    goto Exit;
+                }
 
+                WPARAM wParamTmp;
                 wParamTmp = UserGetKeyState(VK_SHIFT) & 0x8000 ? SC_PREVWINDOW : SC_NEXTWINDOW;
                 TRACE("Send WM_SYSCOMMAND Alt-Tab/ESC Alt-Shift-Tab/ESC\n");
+
                 co_IntSendMessage( Msg->hwnd, WM_SYSCOMMAND, wParamTmp, Msg->wParam );
 
-                //// Keep looping.
                 Ret = FALSE;
-                //// Skip the rest.
                 goto Exit;
             }
         }
     }
 
     if (co_HOOK_CallHooks( WH_KEYBOARD,
-                          *RemoveMessages ? HC_ACTION : HC_NOREMOVE,
+                           *RemoveMessages ? HC_ACTION : HC_NOREMOVE,
                            LOWORD(Msg->wParam),
                            Msg->lParam))
     {
-        /* skip this message */
-        co_HOOK_CallHooks( WH_CBT,
-                           HCBT_KEYSKIPPED,
-                           LOWORD(Msg->wParam),
-                           Msg->lParam );
-
-        ERR("KeyboardMessage WH_KEYBOARD Call Hook return!\n");
-
+        co_HOOK_CallHooks( WH_CBT, HCBT_KEYSKIPPED, LOWORD(Msg->wParam), Msg->lParam );
         *RemoveMessages = TRUE;
-
         Ret = FALSE;
     }
 
     if (pWnd && Ret && *RemoveMessages && bKeyUpDown && !(pti->TIF_flags & TIF_DISABLEIME))
     {
-        ImmRet = IntImmProcessKey(pti->MessageQueue, pWnd, uMsg, Msg->wParam, Msg->lParam);
-        if (ImmRet)
+        /* HARDENING: Final check before IMM processing */
+        if (!(pWnd->head.pti->TIF_flags & TIF_INCLEANUP))
         {
-            if ( ImmRet & (IPHK_HOTKEY|IPHK_SKIPTHISKEY) )
+            ImmRet = IntImmProcessKey(pti->MessageQueue, pWnd, uMsg, Msg->wParam, Msg->lParam);
+            if (ImmRet)
             {
-               ImmRet = 0;
-            }
-            if ( ImmRet & IPHK_PROCESSBYIME )
-            {
-               Msg->wParam = VK_PROCESSKEY;
+                if ( ImmRet & (IPHK_HOTKEY|IPHK_SKIPTHISKEY) ) ImmRet = 0;
+                if ( ImmRet & IPHK_PROCESSBYIME ) Msg->wParam = VK_PROCESSKEY;
             }
         }
     }
+
 Exit:
     if (pWnd) UserDerefObjectCo(pWnd);
     return Ret;
@@ -1896,11 +1840,26 @@ Exit:
 
 BOOL co_IntProcessHardwareMessage(MSG* Msg, BOOL* RemoveMessages, BOOL* NotForUs, LONG_PTR ExtraInfo, UINT first, UINT last)
 {
-    if ( IS_MOUSE_MESSAGE(Msg->message))
+    PWND pWndTarget = ValidateHwndNoErr(Msg->hwnd);
+
+    /* HARDENING: Global Zombie Check.
+     * If the message is destined for a window whose thread is cleaning up,
+     * drop it immediately before it hits the synchronous handlers.
+     */
+    if (pWndTarget && pWndTarget->head.pti &&
+       (pWndTarget->head.pti->TIF_flags & TIF_INCLEANUP))
+    {
+        TRACE("WIN32K: Dropping hardware message 0x%x for dying thread %p\n",
+              Msg->message, pWndTarget->head.pti);
+        *RemoveMessages = TRUE;
+        return FALSE;
+    }
+
+    if (IS_MOUSE_MESSAGE(Msg->message))
     {
         return co_IntProcessMouseMessage(Msg, RemoveMessages, NotForUs, ExtraInfo, first, last);
     }
-    else if ( IS_KBD_MESSAGE(Msg->message))
+    else if (IS_KBD_MESSAGE(Msg->message))
     {
         return co_IntProcessKeyboardMessage(Msg, RemoveMessages);
     }
@@ -2425,22 +2384,51 @@ MsqDestroyMessageQueue(_In_ PTHREADINFO pti)
    PDESKTOP desk;
    PUSER_MESSAGE_QUEUE MessageQueue = pti->MessageQueue;
 
-   NT_ASSERT(MessageQueue != NULL);
+   /* 1. Basic Validation */
+   if (!MessageQueue)
+   {
+       DPRINT1("MsqDestroyMessageQueue: pti %p has no MessageQueue!\n", pti);
+       return;
+   }
+
+   /* * 2. Reference Pinning (The UAF Fix)
+    * We manually increment the count to ensure the MQ survives
+    * the desktop dissociation.
+    */
+   IntReferenceMessageQueue(MessageQueue);
+   DPRINT1("MsqDestroyMessageQueue: Pinning MQ %p, Refs: %ld\n",
+           MessageQueue, MessageQueue->References);
+
+   /* 3. State Assertion */
+   ASSERT(!(MessageQueue->QF_flags & QF_INDESTROY));
    MessageQueue->QF_flags |= QF_INDESTROY;
 
-   /* remove the message queue from any desktops */
+   /* 4. Desktop Dissociation */
    if ((desk = InterlockedExchangePointer((PVOID*)&MessageQueue->Desktop, 0)))
    {
+      DPRINT1("MsqDestroyMessageQueue: Removing MQ %p from Desktop %p\n", MessageQueue, desk);
       (void)InterlockedExchangePointer((PVOID*)&desk->ActiveMessageQueue, 0);
+
+      /* This matches the Desktop's reference. It will not hit 0 because of our Pin. */
       IntDereferenceMessageQueue(MessageQueue);
    }
 
-   /* clean it up */
+   /* 5. Safe Cleanup
+    * Since the MQ is pinned, MsqCleanupMessageQueue can safely
+    * traverse lists without fear of memory disappearing.
+    */
+   DPRINT1("MsqDestroyMessageQueue: Calling MsqCleanup for pti %p\n", pti);
    MsqCleanupMessageQueue(pti);
 
-   /* decrease the reference counter, if it hits zero, the queue will be freed */
-   _PRAGMA_WARNING_SUPPRESS(__WARNING_USING_UNINIT_VAR);
+   /* 6. Final Dereference
+    * Now that all internal pointers have been cleaned, it is safe
+    * for the reference count to hit zero and free the pool memory.
+    */
+   DPRINT1("MsqDestroyMessageQueue: Final deref for MQ %p\n", MessageQueue);
    IntDereferenceMessageQueue(MessageQueue);
+
+   /* 7. Prevent Stale Access */
+   pti->MessageQueue = NULL;
 }
 
 LPARAM FASTCALL

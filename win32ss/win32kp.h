@@ -81,6 +81,7 @@ typedef struct _DC *PDC;
 #include "user/ntuser/timer.h"
 #include "user/ntuser/caret.h"
 #include "user/ntuser/painting.h"
+#include "user/ntuser/printredir.h"
 #include "user/ntuser/class.h"
 #include "user/ntuser/window.h"
 #include "user/ntuser/security.h"
