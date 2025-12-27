@@ -9,7 +9,7 @@
 #include <win32k.h>
 #include <immdev.h>
 
-//#define NDEBUG
+#define NDEBUG
 #include <debug.h>
 
 DBG_DEFAULT_CHANNEL(UserWinpos);

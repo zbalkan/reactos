@@ -11,7 +11,7 @@
 #include "printredir.h"
 DBG_DEFAULT_CHANNEL(UserPainting);
 
-//#define NDEBUG
+#define NDEBUG
 #include <debug.h>
 
 BOOL UserExtTextOutW(HDC hdc, INT x, INT y, UINT flags, PRECTL lprc,
@@ -2578,52 +2578,38 @@ NtUserPrintWindow(
     BOOL Ret = FALSE;
     USER_REFERENCE_ENTRY Ref;
 
-    DPRINT1("Enter NtUserPrintWindow: HWND %p, HDC %p, Flags 0x%x\n", hwnd, hdcBlt, nFlags);
-
     UserEnterExclusive();
 
-    if (hwnd)
+    if (!(Window = UserGetWindowObject(hwnd)) ||
+        UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
     {
-        if (!(Window = UserGetWindowObject(hwnd)) ||
-            UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
-        {
-            goto Exit;
-        }
-
-        /* * HARDENING: Hypothesis 4 - The Zombie Paint Shield.
-         * If TaskSwitchXP attempts to capture a window whose thread is
-         * currently cleaning up, we MUST abort to avoid a kernel deadlock.
-         */
-        if (Window->head.pti->TIF_flags & TIF_INCLEANUP)
-        {
-            DPRINT1("WIN32K: Aborting PrintWindow for zombie thread %p\n", Window->head.pti);
-            goto Exit;
-        }
-
-        /* Verify flags - Windows NT 5.x only supports PW_CLIENTONLY (0x1) */
-        if (nFlags & ~PW_CLIENTONLY)
-        {
-            EngSetLastError(ERROR_INVALID_PARAMETER);
-            goto Exit;
-        }
-
-        /* Reference the window while we send a message */
-        UserRefObjectCo(Window, &Ref);
-
-        /*
-         * BEHAVIORAL IDENTITY FIX:
-         * Despite MSDN, Windows NT 5.3+ (XP/Win10) dispatches WM_PAINT (15).
-         * We pass the destination HDC as wParam.
-         */
-        DPRINT1("NtUserPrintWindow: Dispatching WM_PAINT to %p via co_IntSendMessage\n", hwnd);
-
-        Ret = co_IntSendMessage(hwnd,
-                                WM_PAINT,
-                                (WPARAM)hdcBlt,
-                                0);
-
-        UserDerefObjectCo(Window);
+        goto Exit;
     }
+
+    /* Zombie Thread Shield (Hypothesis 4) */
+    if (Window->head.pti->TIF_flags & TIF_INCLEANUP)
+    {
+        DPRINT1("WIN32K: Aborting PrintWindow for zombie thread %p\n", Window->head.pti);
+        goto Exit;
+    }
+
+    /* Verify flags */
+    if (nFlags & ~PW_CLIENTONLY)
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        goto Exit;
+    }
+
+    UserRefObjectCo(Window, &Ref);
+
+    /* * THE KEY FIX: Call IntPrintWindow.
+     * This function sets up the PPRINTWINDOW_CTX and attaches it to the window.
+     * It ensures that any BeginPaint calls occurring during this scope
+     * are diverted to hdcBlt.
+     */
+    Ret = IntPrintWindow(Window, hdcBlt, nFlags);
+
+    UserDerefObjectCo(Window);
 
 Exit:
     UserLeave();

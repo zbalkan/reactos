@@ -11,7 +11,7 @@
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(UserMsgQ);
 
-//#define NDEBUG
+#define NDEBUG
 #include <debug.h>
 
 /* GLOBALS *******************************************************************/

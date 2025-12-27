@@ -9,7 +9,7 @@
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(UserDce);
 
-//#define NDEBUG
+#define NDEBUG
 #include <debug.h>
 
 #include "printredir.h"

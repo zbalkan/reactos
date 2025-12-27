@@ -9,8 +9,8 @@
 /* INCLUDES ******************************************************************/
 
 #include <win32k.h>
-//#define NDEBUG
-//#include <debug.h>
+#define NDEBUG
+#include <debug.h>
 
 extern PENTRY gpentHmgr;
 extern PULONG gpaulRefCount;

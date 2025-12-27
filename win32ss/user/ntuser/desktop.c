@@ -11,7 +11,7 @@
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(UserDesktop);
 
-//#define NDEBUG
+#define NDEBUG
 #include <debug.h>
 
 #include <reactos/buildno.h>

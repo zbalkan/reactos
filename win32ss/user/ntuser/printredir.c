@@ -3,7 +3,7 @@
 
 /* Define the debug channel so TRACE/ERR/WARN macros work */
 DBG_DEFAULT_CHANNEL(UserPainting);
-//#define NDEBUG
+#define NDEBUG
 #include <debug.h>
 
 #define USERTAG_PRINTREDIR 'rPtW'
