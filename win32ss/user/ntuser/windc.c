@@ -918,9 +918,30 @@ UserGetDCEx(PWND Window OPTIONAL, HANDLE hrgnClip, ULONG flags)
     /* Check window properties for active redirection frames */
     if (Window && UserPrintRedirectIsActive(Window, &hdc, &ptOffset))
     {
-        /* Ensure the redirected DC's origin matches the window's current position */
-        DceSetDrawable(Window, hdc, flags, TRUE);
-        return hdc;
+        /* DEFENSIVE: Validate redirected DC */
+        if (!hdc)
+        {
+            DPRINT1("UserGetDCEx: PrintWindow redirection active but hdc is NULL for Window %p\n", Window);
+            /* Fall through to standard path */
+        }
+        else
+        {
+            /* Ensure the redirected DC's origin matches the window's current position */
+            DceSetDrawable(Window, hdc, flags, TRUE);
+
+            /* Set window origin to map window coordinates to bitmap coordinates */
+            /* The offset is negative of window position, so we negate it to get the origin */
+            if (!NtGdiSetWindowOrgEx(hdc, -ptOffset.x, -ptOffset.y, NULL))
+            {
+                DPRINT1("UserGetDCEx: Failed to set window origin for redirected HDC %p (Offset: %ld,%ld)\n",
+                        hdc, ptOffset.x, ptOffset.y);
+                /* Continue anyway - some DCs might not support this */
+            }
+
+            DPRINT1("UserGetDCEx: Returning redirected HDC %p for Window %p (Offset: %ld,%ld)\n",
+                    hdc, Window, ptOffset.x, ptOffset.y);
+            return hdc;
+        }
     }
 
     /* Fallback to standard DC allocation if no redirection is active */

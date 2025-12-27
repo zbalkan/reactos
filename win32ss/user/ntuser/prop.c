@@ -7,6 +7,7 @@
  */
 
 #include <win32k.h>
+#include "printredir.h"
 DBG_DEFAULT_CHANNEL(UserProp);
 
 /* STATIC FUNCTIONS **********************************************************/
@@ -123,6 +124,18 @@ UserRemoveWindowProps(
     {
         ListEntry = Window->PropListHead.Flink;
         Property = CONTAINING_RECORD(ListEntry, PROPERTY, PropListEntry);
+
+        /* Special cleanup for PrintWindow context (kernel pool memory) */
+        /* The PrintWindow context is stored as a kernel pool pointer in system properties */
+        if ((Property->fs & PROPERTY_FLAG_SYSTEM) &&
+            AtomPrintWindowCtx != 0 &&
+            Property->Atom == AtomPrintWindowCtx &&
+            Property->Data)
+        {
+            /* This is a PrintWindow context - free the kernel pool memory */
+            ExFreePoolWithTag((PVOID)Property->Data, 'rPtW');
+        }
+
         RemoveEntryList(&Property->PropListEntry);
         UserHeapFree(Property);
         Window->PropListItems--;

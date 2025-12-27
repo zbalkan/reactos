@@ -24,12 +24,35 @@ static __inline PPRINTWINDOW_CTX
 IntGetPrintWindowCtx(_In_ PWND pwnd, _Out_opt_ PWND *ppwndRoot)
 {
     PWND cur = pwnd;
+    ULONG Depth = 0;
+    const ULONG MAX_WINDOW_DEPTH = 256; /* DEFENSIVE: Prevent infinite loops */
 
-    while (cur)
+    /* DEFENSIVE: Validate input */
+    if (!pwnd)
     {
+        if (ppwndRoot) *ppwndRoot = NULL;
+        return NULL;
+    }
+
+    while (cur && Depth < MAX_WINDOW_DEPTH)
+    {
+        /* DEFENSIVE: Check if window is destroyed before accessing properties */
+        if (cur->state & WNDS_DESTROYED || cur->state2 & WNDS2_INDESTROY)
+        {
+            DPRINT1("IntGetPrintWindowCtx: Encountered destroyed window %p in tree\n", cur);
+            break;
+        }
+
         PPRINTWINDOW_CTX ctx = (PPRINTWINDOW_CTX)UserGetProp(cur, AtomPrintWindowCtx, TRUE);
         if (ctx)
         {
+            /* DEFENSIVE: Validate context pointer */
+            if (ctx->hdcBlt == NULL)
+            {
+                DPRINT1("IntGetPrintWindowCtx: Found context %p with NULL hdcBlt for PWND %p\n", ctx, cur);
+                break;
+            }
+
             if (ppwndRoot) *ppwndRoot = cur;
             return ctx;
         }
@@ -39,6 +62,12 @@ IntGetPrintWindowCtx(_In_ PWND pwnd, _Out_opt_ PWND *ppwndRoot)
             break;
 
         cur = cur->spwndParent;
+        Depth++;
+    }
+
+    if (Depth >= MAX_WINDOW_DEPTH)
+    {
+        DPRINT1("IntGetPrintWindowCtx: Maximum window depth exceeded for PWND %p\n", pwnd);
     }
 
     if (ppwndRoot) *ppwndRoot = NULL;
@@ -1268,33 +1297,155 @@ IntPrintWindow(PWND pwnd, HDC hdcBlt, UINT nFlags)
     BOOL Ret = FALSE;
     POINT ptOffset;
 
-    DPRINT1("IntPrintWindow: Starting capture for PWND %p (Title: %S)\n",
-            pwnd, pwnd->strName.Buffer ? pwnd->strName.Buffer : L"No Name");
+    /* DEFENSIVE: Validate inputs before any state changes */
+    if (!pwnd)
+    {
+        DPRINT1("IntPrintWindow: NULL pwnd\n");
+        return FALSE;
+    }
+
+    if (!hdcBlt)
+    {
+        DPRINT1("IntPrintWindow: NULL hdcBlt for PWND %p\n", pwnd);
+        return FALSE;
+    }
+
+    /* DEFENSIVE: Check window state */
+    if (pwnd->state & WNDS_DESTROYED)
+    {
+        DPRINT1("IntPrintWindow: Window %p is destroyed\n", pwnd);
+        return FALSE;
+    }
+
+    /* DEFENSIVE: Check window visibility - Windows PrintWindow works on visible windows */
+    /* Note: Windows allows PrintWindow on hidden windows in some cases, but we'll be conservative */
+    /* and require visibility for now to match typical usage patterns */
+    if (!(pwnd->style & WS_VISIBLE))
+    {
+        DPRINT1("IntPrintWindow: Window %p is not visible (PrintWindow may fail)\n", pwnd);
+        /* Continue anyway - some apps might handle this */
+    }
+
+    /* DEFENSIVE: Validate window coordinates are reasonable */
+    if (RECTL_bIsEmptyRect(&pwnd->rcWindow))
+    {
+        DPRINT1("IntPrintWindow: Window %p has empty rcWindow\n", pwnd);
+        return FALSE;
+    }
+
+    DPRINT1("IntPrintWindow: Starting capture for PWND %p (Title: %S, Window: %ld,%ld-%ld,%ld)\n",
+            pwnd, pwnd->strName.Buffer ? pwnd->strName.Buffer : L"No Name",
+            pwnd->rcWindow.left, pwnd->rcWindow.top,
+            pwnd->rcWindow.right, pwnd->rcWindow.bottom);
 
     /* 1. Calculate offset: we want to map window (0,0) to the bitmap (0,0) */
+    /* For PrintWindow, we capture the entire window including non-client area */
     ptOffset.x = -pwnd->rcWindow.left;
     ptOffset.y = -pwnd->rcWindow.top;
+
+    DPRINT1("IntPrintWindow: Calculated offset %ld,%ld for PWND %p\n", ptOffset.x, ptOffset.y, pwnd);
 
     /* 2. Push redirection to the Window Object (Cross-process visible) */
     DPRINT1("PrintWindow: Pushing redirection for PWND %p to HDC %p\n", pwnd, hdcBlt);
     if (!UserPrintRedirectPush(pwnd, hdcBlt, &ptOffset, nFlags))
     {
+        DPRINT1("PrintWindow: Failed to push redirection context for PWND %p\n", pwnd);
         return FALSE;
     }
 
-    /* 3. The "Missing Link": Send WM_PRINT to the target thread.
-          TaskSwitchXP relies on the app rendering itself via this message. */
-          DPRINT1("PrintWindow: Sending WM_PRINT to window %p\n", UserHMGetHandle(pwnd));
-          co_IntSendMessage(UserHMGetHandle(pwnd), WM_PRINT, (WPARAM)hdcBlt,
-                     PRF_CLIENT | PRF_NONCLIENT | PRF_CHILDREN | PRF_ERASEBKGND);
+    /* DEFENSIVE: Verify window is still valid before sending message */
+    if (pwnd->state & WNDS_DESTROYED || pwnd->state2 & WNDS2_INDESTROY)
+    {
+        DPRINT1("IntPrintWindow: Window %p was destroyed before WM_PRINT\n", pwnd);
+        UserPrintRedirectPop(pwnd);
+        return FALSE;
+    }
 
-    /* 4. Fallback: Force a redraw if the app doesn't handle WM_PRINT */
+    /* DEFENSIVE: Get handle and verify it's still valid */
+    HWND hWnd = UserHMGetHandle(pwnd);
+    if (!hWnd || UserObjectInDestroy(hWnd))
+    {
+        DPRINT1("IntPrintWindow: Window handle %p is invalid or being destroyed\n", hWnd);
+        UserPrintRedirectPop(pwnd);
+        return FALSE;
+    }
+
+    /* 3. Try WM_PRINT first - some applications handle this directly */
+    /* WM_PRINT allows apps to render directly to the provided DC */
+    /* Set window origin before sending WM_PRINT to map window coordinates correctly */
+    if (!NtGdiSetWindowOrgEx(hdcBlt, -ptOffset.x, -ptOffset.y, NULL))
+    {
+        DPRINT1("IntPrintWindow: Failed to set window origin for HDC %p\n", hdcBlt);
+        /* Continue - some DCs might not support this, but try anyway */
+    }
+
+    DPRINT1("PrintWindow: Sending WM_PRINT to window %p (Flags: 0x%x)\n", hWnd,
+            PRF_CLIENT | PRF_NONCLIENT | PRF_CHILDREN | PRF_ERASEBKGND);
+    co_IntSendMessage(hWnd, WM_PRINT, (WPARAM)hdcBlt,
+               PRF_CLIENT | PRF_NONCLIENT | PRF_CHILDREN | PRF_ERASEBKGND);
+
+    /* Reset window origin after WM_PRINT - origin will be set again in BeginPaint/GetDC if needed */
+    NtGdiSetWindowOrgEx(hdcBlt, 0, 0, NULL);
+
+    /* DEFENSIVE: Verify window is still valid before redraw */
+    if (pwnd->state & WNDS_DESTROYED || pwnd->state2 & WNDS2_INDESTROY)
+    {
+        DPRINT1("IntPrintWindow: Window %p was destroyed before redraw\n", pwnd);
+        UserPrintRedirectPop(pwnd);
+        return FALSE;
+    }
+
+    /* 4. Force synchronous redraw to capture window content via BeginPaint/GetDC */
+    /* CRITICAL: RDW_INVALIDATE creates the update region from window's client rect */
+    /* Without an update region, co_IntUpdateWindows will not send WM_PAINT */
+    /* RDW_UPDATENOW ensures synchronous painting - it will:
+     *   - Invalidate the window (creates update region from client rect)
+     *   - Call UserUpdateWindows which sends WM_PAINT messages
+     *   - BeginPaint/GetDC calls will be redirected to hdcBlt via our redirection context
+     *   - All painting happens synchronously before this function returns
+     */
+    DPRINT1("PrintWindow: Forcing synchronous redraw for PWND %p (UpdateRegion before: %p)\n",
+            pwnd, pwnd->hrgnUpdate);
     co_UserRedrawWindow(pwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
+
+    DPRINT1("PrintWindow: After redraw for PWND %p (UpdateRegion: %p, InternalPaint: %s, PaintNotProcessed: %s)\n",
+            pwnd, pwnd->hrgnUpdate,
+            (pwnd->state & WNDS_INTERNALPAINT) ? "YES" : "NO",
+            (pwnd->state & WNDS_PAINTNOTPROCESSED) ? "YES" : "NO");
+
+    /* DEFENSIVE: Verify window is still valid after redraw */
+    if (pwnd->state & WNDS_DESTROYED || pwnd->state2 & WNDS2_INDESTROY)
+    {
+        DPRINT1("IntPrintWindow: Window %p was destroyed during redraw\n", pwnd);
+        UserPrintRedirectPop(pwnd);
+        return FALSE;
+    }
+
+    /* DEFENSIVE: Verify window processed WM_PAINT */
+    /* If WNDS_PAINTNOTPROCESSED is still set, the window proc didn't handle WM_PAINT */
+    /* This means either:
+     *   1. WM_PAINT wasn't sent (update region issue)
+     *   2. Window proc doesn't handle WM_PAINT
+     *   3. Window proc handles WM_PAINT but doesn't call BeginPaint
+     */
+    if (pwnd->state & WNDS_PAINTNOTPROCESSED)
+    {
+        DPRINT1("IntPrintWindow: WARNING - Window %p did not process WM_PAINT (WNDS_PAINTNOTPROCESSED still set)\n", pwnd);
+        DPRINT1("IntPrintWindow: This may indicate the window proc doesn't handle WM_PAINT or doesn't call BeginPaint\n");
+        /* Note: co_IntPaintWindows fallback doesn't paint client area, only NC and erase */
+        /* For PrintWindow to work, the window MUST handle WM_PAINT and call BeginPaint */
+    }
+    else
+    {
+        DPRINT1("IntPrintWindow: Window %p processed WM_PAINT successfully\n", pwnd);
+    }
 
     Ret = TRUE;
 
-    /* 5. Cleanup */
+    /* 5. Cleanup - pop redirection context after all painting is complete */
+    /* The redirection context must remain active during the entire paint operation above */
     UserPrintRedirectPop(pwnd);
+    DPRINT1("PrintWindow: Completed capture for PWND %p (Result: %s)\n", pwnd, Ret ? "SUCCESS" : "FAILED");
     return Ret;
 }
 
@@ -1440,31 +1591,81 @@ IntBeginPaint(PWND Window, PPAINTSTRUCT pPaintStruct)
     HDC hDC = NULL;
     HRGN hRgnUpdate;
 
+    /* DEFENSIVE: Validate window is still valid */
+    if (!Window)
+    {
+        DPRINT1("IntBeginPaint: NULL Window\n");
+        return NULL;
+    }
+
+    if (Window->state & WNDS_DESTROYED || Window->state2 & WNDS2_INDESTROY)
+    {
+        DPRINT1("IntBeginPaint: Window %p is destroyed or being destroyed\n", Window);
+        return NULL;
+    }
+
     /* 1. Redirection Check */
     pCtx = IntGetPrintWindowCtx(Window, NULL);
 
     if (pCtx)
     {
-        hDC = pCtx->hdcBlt;
+        /* DEFENSIVE: Validate context and DC */
+        if (!pCtx->hdcBlt)
+        {
+            DPRINT1("IntBeginPaint: PrintWindow context %p has NULL hdcBlt for Window %p\n", pCtx, Window);
+            /* Fall through to standard path */
+        }
+        else
+        {
+            hDC = pCtx->hdcBlt;
 
-        RtlZeroMemory(pPaintStruct, sizeof(PAINTSTRUCT));
-        pPaintStruct->hdc = hDC;
-        pPaintStruct->fErase = (Window->state & WNDS_SENDERASEBACKGROUND) ? TRUE : FALSE;
+            RtlZeroMemory(pPaintStruct, sizeof(PAINTSTRUCT));
+            pPaintStruct->hdc = hDC;
+            pPaintStruct->fErase = (Window->state & WNDS_SENDERASEBACKGROUND) ? TRUE : FALSE;
 
-        pPaintStruct->rcPaint.left = 0;
-        pPaintStruct->rcPaint.top = 0;
-        pPaintStruct->rcPaint.right = Window->rcClient.right - Window->rcClient.left;
-        pPaintStruct->rcPaint.bottom = Window->rcClient.bottom - Window->rcClient.top;
+            /* For PrintWindow, we want to paint the entire client area */
+            /* Don't use the update region - we want everything */
+            /* DEFENSIVE: Validate client rect is not empty */
+            if (Window->rcClient.right > Window->rcClient.left &&
+                Window->rcClient.bottom > Window->rcClient.top)
+            {
+                pPaintStruct->rcPaint.left = 0;
+                pPaintStruct->rcPaint.top = 0;
+                pPaintStruct->rcPaint.right = Window->rcClient.right - Window->rcClient.left;
+                pPaintStruct->rcPaint.bottom = Window->rcClient.bottom - Window->rcClient.top;
+            }
+            else
+            {
+                DPRINT1("IntBeginPaint: Window %p has empty client rect, using zero rect\n", Window);
+                RtlZeroMemory(&pPaintStruct->rcPaint, sizeof(RECT));
+            }
 
-        /* Use NtGdiSetWindowOrgEx - the standard internal win32k call */
-        NtGdiSetWindowOrgEx(hDC, -pCtx->ptOffset.x, -pCtx->ptOffset.y, NULL);
+            /* Use NtGdiSetWindowOrgEx - the standard internal win32k call */
+            /* This maps window coordinates to bitmap coordinates */
+            /* DEFENSIVE: Check if setting origin succeeds */
+            if (!NtGdiSetWindowOrgEx(hDC, -pCtx->ptOffset.x, -pCtx->ptOffset.y, NULL))
+            {
+                DPRINT1("IntBeginPaint: Failed to set window origin for HDC %p (Offset: %ld,%ld)\n",
+                        hDC, pCtx->ptOffset.x, pCtx->ptOffset.y);
+                /* Continue anyway - some DCs might not support this */
+            }
 
-        IntInvalidateWindows(Window, NULL, RDW_VALIDATE | RDW_NOCHILDREN);
+            /* CRITICAL: Do NOT validate the window here!
+             * We need to keep the update region active so that:
+             * 1. The window actually paints (it won't if hrgnUpdate is NULL)
+             * 2. The update region is only cleared in EndPaint after painting completes
+             * Validating here would clear hrgnUpdate and prevent any painting from happening
+             */
 
-        Window->state &= ~(WNDS_SENDERASEBACKGROUND | WNDS_ERASEBACKGROUND);
-        Window->state2 |= WNDS2_PRINTWND_ACTIVE;
+            Window->state &= ~(WNDS_SENDERASEBACKGROUND | WNDS_ERASEBACKGROUND);
+            Window->state2 |= WNDS2_PRINTWND_ACTIVE;
 
-        return hDC;
+            DPRINT1("IntBeginPaint: PrintWindow redirection active for Window %p, HDC %p, PaintRect: %ld,%ld-%ld,%ld\n",
+                    Window, hDC, pPaintStruct->rcPaint.left, pPaintStruct->rcPaint.top,
+                    pPaintStruct->rcPaint.right, pPaintStruct->rcPaint.bottom);
+
+            return hDC;
+        }
     }
 
     /* 2. Standard Path */
@@ -1511,17 +1712,58 @@ IntEndPaint(PWND Window, PPAINTSTRUCT pPaintStruct)
 {
     PPRINTWINDOW_CTX pCtx;
 
+    /* DEFENSIVE: Validate inputs */
+    if (!Window)
+    {
+        DPRINT1("IntEndPaint: NULL Window\n");
+        return FALSE;
+    }
+
+    if (!pPaintStruct)
+    {
+        DPRINT1("IntEndPaint: NULL pPaintStruct for Window %p\n", Window);
+        return FALSE;
+    }
+
+    /* DEFENSIVE: Check if window was destroyed during painting */
+    if (Window->state & WNDS_DESTROYED)
+    {
+        DPRINT1("IntEndPaint: Window %p was destroyed during painting\n", Window);
+        /* Continue cleanup anyway */
+    }
+
     if (Window->state2 & WNDS2_PRINTWND_ACTIVE)
     {
         pCtx = IntGetPrintWindowCtx(Window, NULL);
         if (pCtx)
         {
-            /* Reset Origin using NtGdiSetWindowOrgEx */
-            NtGdiSetWindowOrgEx(pCtx->hdcBlt, 0, 0, NULL);
+            /* DEFENSIVE: Validate context before use */
+            if (pCtx->hdcBlt)
+            {
+                /* Reset Origin using NtGdiSetWindowOrgEx */
+                if (!NtGdiSetWindowOrgEx(pCtx->hdcBlt, 0, 0, NULL))
+                {
+                    DPRINT1("IntEndPaint: Failed to reset window origin for HDC %p\n", pCtx->hdcBlt);
+                    /* Continue - not critical */
+                }
+            }
+            else
+            {
+                DPRINT1("IntEndPaint: PrintWindow context %p has NULL hdcBlt for Window %p\n", pCtx, Window);
+            }
         }
+        else
+        {
+            DPRINT1("IntEndPaint: PrintWindow active but context not found for Window %p\n", Window);
+        }
+
+        /* Now validate the window - painting is complete */
+        /* This clears the update region and marks the window as painted */
+        IntInvalidateWindows(Window, NULL, RDW_VALIDATE | RDW_NOCHILDREN);
 
         Window->state2 &= ~WNDS2_PRINTWND_ACTIVE;
         co_UserShowCaret(Window);
+        DPRINT1("IntEndPaint: PrintWindow painting completed for Window %p\n", Window);
         return TRUE;
     }
 
@@ -2578,41 +2820,103 @@ NtUserPrintWindow(
     BOOL Ret = FALSE;
     USER_REFERENCE_ENTRY Ref;
 
+    /* DEFENSIVE: Validate HDC before acquiring locks */
+    if (!hdcBlt)
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
     UserEnterExclusive();
 
-    if (!(Window = UserGetWindowObject(hwnd)) ||
-        UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
+    /* DEFENSIVE: Validate window handle */
+    if (!hwnd)
     {
+        DPRINT1("NtUserPrintWindow: NULL hwnd\n");
+        EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
         goto Exit;
     }
 
-    /* Zombie Thread Shield (Hypothesis 4) */
+    Window = UserGetWindowObject(hwnd);
+    if (!Window)
+    {
+        DPRINT1("NtUserPrintWindow: Invalid window handle %p\n", hwnd);
+        EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        goto Exit;
+    }
+
+    /* DEFENSIVE: Reject desktop and message windows (Windows NT 5.3 behavior) */
+    if (UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
+    {
+        DPRINT1("NtUserPrintWindow: Cannot print desktop or message window %p\n", hwnd);
+        EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        goto Exit;
+    }
+
+    /* DEFENSIVE: Zombie Thread Shield - reject windows from threads in cleanup */
     if (Window->head.pti->TIF_flags & TIF_INCLEANUP)
     {
-        DPRINT1("WIN32K: Aborting PrintWindow for zombie thread %p\n", Window->head.pti);
+        DPRINT1("NtUserPrintWindow: Aborting PrintWindow for zombie thread %p (Window: %p)\n",
+                Window->head.pti, hwnd);
+        EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
         goto Exit;
     }
 
-    /* Verify flags */
+    /* DEFENSIVE: Verify flags - Windows NT 5.3 only supports PW_CLIENTONLY */
     if (nFlags & ~PW_CLIENTONLY)
     {
+        DPRINT1("NtUserPrintWindow: Invalid flags 0x%x for window %p (only PW_CLIENTONLY=0x%x supported)\n",
+                nFlags, hwnd, PW_CLIENTONLY);
         EngSetLastError(ERROR_INVALID_PARAMETER);
+        goto Exit;
+    }
+
+    /* DEFENSIVE: Check if window is destroyed */
+    if (Window->state & WNDS_DESTROYED)
+    {
+        DPRINT1("NtUserPrintWindow: Window %p is destroyed\n", hwnd);
+        EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
         goto Exit;
     }
 
     UserRefObjectCo(Window, &Ref);
 
-    /* * THE KEY FIX: Call IntPrintWindow.
+    /* DEFENSIVE: Re-verify window is still valid after acquiring reference */
+    /* Window might have been destroyed between validation and reference acquisition */
+    if (Window->state & WNDS_DESTROYED || Window->state2 & WNDS2_INDESTROY)
+    {
+        DPRINT1("NtUserPrintWindow: Window %p was destroyed after reference acquisition\n", hwnd);
+        EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        UserDerefObjectCo(Window);
+        goto Exit;
+    }
+
+    /* DEFENSIVE: Verify window handle is still valid */
+    if (UserObjectInDestroy(UserHMGetHandle(Window)))
+    {
+        DPRINT1("NtUserPrintWindow: Window handle %p is being destroyed\n", hwnd);
+        EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        UserDerefObjectCo(Window);
+        goto Exit;
+    }
+
+    /* Call IntPrintWindow to perform the actual capture.
      * This function sets up the PPRINTWINDOW_CTX and attaches it to the window.
-     * It ensures that any BeginPaint calls occurring during this scope
+     * It ensures that any BeginPaint/GetDC calls occurring during this scope
      * are diverted to hdcBlt.
      */
     Ret = IntPrintWindow(Window, hdcBlt, nFlags);
+    if (!Ret)
+    {
+        DPRINT1("NtUserPrintWindow: IntPrintWindow failed for window %p\n", hwnd);
+        /* IntPrintWindow should have set last error if needed */
+    }
 
     UserDerefObjectCo(Window);
 
 Exit:
     UserLeave();
+    DPRINT1("NtUserPrintWindow: Returning %s for window %p\n", Ret ? "TRUE" : "FALSE", hwnd);
     return Ret;
 }
 
