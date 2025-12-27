@@ -11,7 +11,7 @@
 #include "printredir.h"
 DBG_DEFAULT_CHANNEL(UserPainting);
 
-#define NDEBUG
+//#define NDEBUG
 #include <debug.h>
 
 BOOL UserExtTextOutW(HDC hdc, INT x, INT y, UINT flags, PRECTL lprc,
@@ -2819,6 +2819,8 @@ NtUserPrintWindow(
     PWND Window;
     BOOL Ret = FALSE;
     USER_REFERENCE_ENTRY Ref;
+
+    DPRINT1("!!! SYSCALL HIT: NtUserPrintWindow(0x%p, 0x%p, %u) !!!\n", hwnd, hdcBlt, nFlags);
 
     /* DEFENSIVE: Validate HDC before acquiring locks */
     if (!hdcBlt)

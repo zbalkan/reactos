@@ -14,6 +14,9 @@ DBG_DEFAULT_CHANNEL(UserDce);
 
 #include "printredir.h"
 
+/* Internal flag to prevent recursion in IntGetDCEx during PrintWindow redirection */
+#define TIF_IN_GETDC_REDIRECT 0x20000000
+
 /* GLOBALS *******************************************************************/
 
 /* NOTE: I think we should store this per window station (including GDI objects) */
@@ -324,13 +327,41 @@ HDC FASTCALL
 IntGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
 {
    PWND Parent;
-   ULONG DcxFlags;
-   DCE* Dce = NULL;
-   BOOL UpdateClipOrigin = FALSE;
-   BOOL bUpdateVisRgn = TRUE;
-   HDC hDC = NULL;
-   PPROCESSINFO ppi;
-   PLIST_ENTRY ListEntry;
+    ULONG DcxFlags;
+    DCE* Dce = NULL;
+    BOOL UpdateClipOrigin = FALSE;
+    BOOL bUpdateVisRgn = TRUE;
+    HDC hDC = NULL;
+    PPROCESSINFO ppi;
+    PLIST_ENTRY ListEntry;
+
+    /* Redirection variables */
+    HDC hdcRedir = NULL;
+    POINT ptOffset;
+    PTHREADINFO pti = GetW32ThreadInfo();
+
+    /* * RECURSION GUARD: Check if this thread is already performing a redirection lookup.
+     * We use a temporary flag in the TIF_flags or a similar check.
+     * For now, we check if the window is NULL to skip redirection on nested system calls.
+     */
+    if (Wnd && !(pti->TIF_flags & TIF_IN_GETDC_REDIRECT))
+    {
+        if (UserPrintRedirectIsActive(Wnd, &hdcRedir, &ptOffset))
+        {
+            /* Set the flag to prevent recursion */
+            pti->TIF_flags |= TIF_IN_GETDC_REDIRECT;
+
+            /* Map window coordinates to memory bitmap coordinates */
+            NtGdiSetWindowOrgEx(hdcRedir, -ptOffset.x, -ptOffset.y, NULL);
+            IntGdiSetHookFlags(hdcRedir, DCHF_INVALIDATEVISRGN);
+
+            /* Clear the flag before returning */
+            pti->TIF_flags &= ~TIF_IN_GETDC_REDIRECT;
+
+            TRACE("IntGetDCEx: Redirected %p to %p\n", Wnd, hdcRedir);
+            return hdcRedir;
+        }
+    }
 
    if (NULL == Wnd)
    {
