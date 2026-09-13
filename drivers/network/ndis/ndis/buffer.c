@@ -147,7 +147,7 @@ UINT CopyBufferChainToBuffer(
 
         RtlCopyMemory((PVOID)DstData, (PVOID)SrcData, BytesToCopy);
         BytesCopied += BytesToCopy;
-        DstData      = (PUCHAR)((ULONG_PTR) DstData + BytesToCopy);
+        DstData      = (PUCHAR)((ULONG_PTR)DstData + BytesToCopy);
 
         Length -= BytesToCopy;
         if (Length == 0)
@@ -216,8 +216,8 @@ UINT CopyPacketToBufferChain(
  * ARGUMENTS:
  *     DstBuffer = Pointer to destination NDIS buffer
  *     DstOffset = Destination start offset
- *     SrcPacket = Pointer to source NDIS packet
- *     SrcOffset = Source start offset
+ *     SrcPacket = Pointer to source packet
+ *     SrcOffset = Offset in source packet to start copying from
  *     Length    = Number of bytes to copy
  * RETURNS:
  *     Number of bytes copied to destination buffer
@@ -381,8 +381,33 @@ NdisAllocateBufferPool(
  *     NumberOfDescriptors = Size of buffer pool in number of descriptors
  */
 {
+    PNDIS_BUFFER_POOL Pool;
+    SIZE_T Size;
+
+    *PoolHandle = NULL;
+
+    if (NumberOfDescriptors >
+        (((SIZE_T)-1 - sizeof(NDIS_BUFFER_POOL)) / sizeof(NETWORK_HEADER)))
+    {
+        *Status = NDIS_STATUS_RESOURCES;
+        return;
+    }
+
+    Size = sizeof(NDIS_BUFFER_POOL) +
+           (SIZE_T)NumberOfDescriptors * sizeof(NETWORK_HEADER);
+
+    Pool = ExAllocatePool(NonPagedPool, Size);
+    if (!Pool)
+    {
+        *Status = NDIS_STATUS_RESOURCES;
+        return;
+    }
+
+    KeInitializeSpinLock(&Pool->SpinLock);
+    Pool->FreeList = NULL;
+
+    *PoolHandle = Pool;
     *Status = NDIS_STATUS_SUCCESS;
-    *PoolHandle = 0;
 }
 
 
@@ -396,7 +421,7 @@ NdisAllocatePacket(
     OUT PNDIS_PACKET    * Packet,
     IN  NDIS_HANDLE     PoolHandle)
 /*
- * FUNCTION: Allocates an NDIS packet descriptor
+ * FUNCTION: Allocates a packet descriptor from a packet pool
  * ARGUMENTS:
  *     Status     = Address of buffer for status
  *     Packet     = Address of buffer for packet descriptor
@@ -782,6 +807,7 @@ NdisFreeBufferPool(
  *     PoolHandle = Handle returned by NdisAllocateBufferPool
  */
 {
+    ExFreePool((PVOID)PoolHandle);
 }
 
 
@@ -853,7 +879,7 @@ NdisGetBufferPhysicalArraySize(
 /*
  * FUNCTION: Returns number of discontiguous physical blocks backing a buffer
  * ARGUMENTS:
- *     Buffer    = Pointer to buffer descriptor
+ *     Buffer    = Pointer to NDIS buffer
  *     ArraySize = Address of buffer to place number of physical blocks
  */
 {
