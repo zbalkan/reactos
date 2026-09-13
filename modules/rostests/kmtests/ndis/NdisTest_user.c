@@ -8,10 +8,10 @@
 
 #include "NdisTest.h"
 
-/**
- * @brief Runs the NDIS buffer-pool contract tests in the standalone test driver.
- */
-START_TEST(NdisBufferPool)
+static
+VOID
+RunNdisTest(
+    _In_ ULONG ControlCode)
 {
     DWORD Error;
 
@@ -20,9 +20,25 @@ START_TEST(NdisBufferPool)
     if (Error)
         return;
 
-    Error = KmtSendToDriver(IOCTL_NDIS_TEST_BUFFER_POOL);
+    Error = KmtSendToDriver(ControlCode);
     ok_eq_ulong(Error, ERROR_SUCCESS);
 
     KmtCloseDriver();
     KmtUnloadDriver();
+}
+
+/**
+ * @brief Verifies creation and destruction of an NDIS buffer pool.
+ */
+START_TEST(NdisBufferPoolCreate)
+{
+    RunNdisTest(IOCTL_NDIS_TEST_BUFFER_POOL_CREATE);
+}
+
+/**
+ * @brief Verifies descriptor accounting and reuse in an NDIS buffer pool.
+ */
+START_TEST(NdisBufferPoolAccounting)
+{
+    RunNdisTest(IOCTL_NDIS_TEST_BUFFER_POOL_ACCOUNTING);
 }

@@ -10,13 +10,33 @@
 static UCHAR BufferStorage[64];
 
 /**
+ * @brief Verifies successful creation and destruction of an NDIS buffer pool.
+ *
+ * A successful NdisAllocateBufferPool call must return a usable opaque pool
+ * handle. NdisFreeBufferPool must accept that handle and release the pool.
+ * No assumptions are made about the pool's internal representation.
+ */
+VOID
+TestNdisBufferPoolCreation(VOID)
+{
+    NDIS_STATUS Status;
+    NDIS_HANDLE PoolHandle = NULL;
+
+    NdisAllocateBufferPool(&Status, &PoolHandle, 1);
+    ok_eq_hex(Status, NDIS_STATUS_SUCCESS);
+    ok(PoolHandle != NULL,
+       "NdisAllocateBufferPool succeeded but returned a NULL pool handle\n");
+
+    if (PoolHandle != NULL)
+        NdisFreeBufferPool(PoolHandle);
+}
+
+/**
  * @brief Verifies that an NDIS buffer pool owns and accounts its descriptors.
  *
- * NdisAllocateBufferPool must return a usable opaque pool handle when the
- * allocation succeeds. A pool created for one descriptor must allow one
- * NdisAllocateBuffer call, reject a second concurrent allocation with
- * NDIS_STATUS_RESOURCES, and make the descriptor available again after
- * NdisFreeBuffer.
+ * A pool created for one descriptor must allow one NdisAllocateBuffer call,
+ * reject a second concurrent allocation with NDIS_STATUS_RESOURCES, and make
+ * the descriptor available again after NdisFreeBuffer.
  *
  * This is deliberately a contract test rather than an implementation test:
  * it makes no assumptions about the internal representation of the pool or
@@ -63,6 +83,12 @@ TestNdisBufferPoolDescriptorAccounting(VOID)
     {
         NdisFreeBuffer(FirstBuffer);
         FirstBuffer = NULL;
+    }
+
+    if (SecondBuffer != NULL)
+    {
+        NdisFreeBuffer(SecondBuffer);
+        SecondBuffer = NULL;
     }
 
     NdisAllocateBuffer(&Status,

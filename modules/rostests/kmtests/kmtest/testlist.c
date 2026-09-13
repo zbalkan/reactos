@@ -22,7 +22,8 @@ KMT_TESTFUNC Test_IoCreateFile;
 KMT_TESTFUNC Test_IoDeviceObject;
 KMT_TESTFUNC Test_IoReadWrite;
 KMT_TESTFUNC Test_MmMapLockedPagesSpecifyCache;
-KMT_TESTFUNC Test_NdisBufferPool;
+KMT_TESTFUNC Test_NdisBufferPoolAccounting;
+KMT_TESTFUNC Test_NdisBufferPoolCreate;
 KMT_TESTFUNC Test_NtCreateSection;
 KMT_TESTFUNC Test_NtSystemDebugControl;
 KMT_TESTFUNC Test_PoIrp;
@@ -59,7 +60,8 @@ const KMT_TEST TestList[] =
     { "IoDeviceObject",               Test_IoDeviceObject },
     { "IoReadWrite",                  Test_IoReadWrite },
     { "MmMapLockedPagesSpecifyCache", Test_MmMapLockedPagesSpecifyCache },
-    { "NdisBufferPool",               Test_NdisBufferPool },
+    { "NdisBufferPoolAccounting",     Test_NdisBufferPoolAccounting },
+    { "NdisBufferPoolCreate",         Test_NdisBufferPoolCreate },
     { "NtCreateSection",              Test_NtCreateSection },
     { "NtSystemDebugControl",         Test_NtSystemDebugControl },
     { "PoIrp",                        Test_PoIrp },

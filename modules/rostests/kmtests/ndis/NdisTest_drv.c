@@ -11,6 +11,9 @@
 static KMT_MESSAGE_HANDLER TestMessageHandler;
 
 VOID
+TestNdisBufferPoolCreation(VOID);
+
+VOID
 TestNdisBufferPoolDescriptorAccounting(VOID);
 
 /**
@@ -33,7 +36,8 @@ TestEntry(
     PAGED_CODE();
 
     *DeviceName = L"NdisTest";
-    KmtRegisterMessageHandler(IOCTL_NDIS_TEST_BUFFER_POOL, NULL, TestMessageHandler);
+    KmtRegisterMessageHandler(IOCTL_NDIS_TEST_BUFFER_POOL_CREATE, NULL, TestMessageHandler);
+    KmtRegisterMessageHandler(IOCTL_NDIS_TEST_BUFFER_POOL_ACCOUNTING, NULL, TestMessageHandler);
 
     return STATUS_SUCCESS;
 }
@@ -69,9 +73,17 @@ TestMessageHandler(
 
     PAGED_CODE();
 
-    if (ControlCode != IOCTL_NDIS_TEST_BUFFER_POOL)
-        return STATUS_INVALID_DEVICE_REQUEST;
+    switch (ControlCode)
+    {
+        case IOCTL_NDIS_TEST_BUFFER_POOL_CREATE:
+            TestNdisBufferPoolCreation();
+            return STATUS_SUCCESS;
 
-    TestNdisBufferPoolDescriptorAccounting();
-    return STATUS_SUCCESS;
+        case IOCTL_NDIS_TEST_BUFFER_POOL_ACCOUNTING:
+            TestNdisBufferPoolDescriptorAccounting();
+            return STATUS_SUCCESS;
+
+        default:
+            return STATUS_INVALID_DEVICE_REQUEST;
+    }
 }
