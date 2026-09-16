@@ -5,6 +5,7 @@
 
 extern void func_cstub(void);
 extern void func_generated(void);
+extern void func_generic_handle(void);
 extern void func_ndr_marshall(void);
 extern void func_ndr_union(void);
 extern void func_rpc(void);
@@ -15,6 +16,7 @@ const struct test winetest_testlist[] =
 {
     { "cstub", func_cstub },
     { "generated", func_generated },
+    { "generic_handle", func_generic_handle },
     { "ndr_marshall", func_ndr_marshall },
     { "ndr_union", func_ndr_union },
     { "rpc", func_rpc },
