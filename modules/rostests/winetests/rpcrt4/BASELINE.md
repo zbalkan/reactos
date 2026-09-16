@@ -88,6 +88,39 @@ RPC/COM/WMI compatibility path:
 The corresponding implementation files in `dll/win32/rpcrt4/` must be reviewed
 against native Windows behavior before removing ReactOS-specific branches.
 
+## Pending conformance probes
+
+### Encapsulated-union pointer-arm sizing
+
+Test: `ndr_union.c:test_encapsulated_union_buffer_size`
+
+Implementation under review:
+`dll/win32/rpcrt4/ndr_marshall.c:union_arm_buffer_size`.
+
+Current source behavior differs after sizing a non-NULL pointer arm:
+
+- ReactOS adds the deferred pointee size back to the saved inline
+  `BufferLength`.
+- Wine restores the saved inline `BufferLength` and leaves the deferred size in
+  `PointerLength`.
+
+The probe uses an NDR format matching WIDL's encapsulated-union layout and tests
+both zero and non-zero initial `BufferLength` values. It deliberately accepts the
+two known candidate outcomes and prints which behavior was observed.
+
+Current semantic classification: `UNVERIFIED_DELTA`.
+
+Do not change the implementation until a native Windows run records at least:
+
+- Windows version/build;
+- architecture;
+- `BufferLength` and `PointerLength` for the non-NULL pointer arm with initial
+  lengths 0 and 16;
+- the complete `ndr_union` test output.
+
+After the Windows result is recorded, tighten the test to the Windows behavior
+and only then modify ReactOS if required.
+
 ## Review record
 
 For each semantic difference, record at minimum:
