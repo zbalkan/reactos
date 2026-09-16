@@ -4,3 +4,4 @@ INTERNALS: Some notes on kernel internals
 TODO:      Bugs and omissions, big and little things that need to be done
 NOTES:     Unsorted material, some of it is redundant
 BUGLIST:   Known bugs, please update when you find one
+RPC_COM_WMI_ROADMAP: Prioritized compatibility roadmap for RPC, COM, DCOM, and WMI
