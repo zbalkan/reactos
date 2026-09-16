@@ -88,7 +88,7 @@ RPC/COM/WMI compatibility path:
 The corresponding implementation files in `dll/win32/rpcrt4/` must be reviewed
 against native Windows behavior before removing ReactOS-specific branches.
 
-## Pending conformance probes
+## Conformance probes
 
 ### Encapsulated-union pointer-arm sizing
 
@@ -120,6 +120,35 @@ Do not change the implementation until a native Windows run records at least:
 
 After the Windows result is recorded, tighten the test to the Windows behavior
 and only then modify ReactOS if required.
+
+### NULL generic binding handle cleanup
+
+Tests:
+
+- `generic_handle.idl`
+- `generic_handle.c:test_null_generic_binding`
+
+Implementation under review:
+`dll/win32/rpcrt4/ndr_stubless.c:client_free_handle`.
+
+Microsoft documents the `[handle]` contract explicitly: a user bind routine
+returns `NULL` on failure, and when it returns `NULL` the corresponding unbind
+routine is not called. ReactOS currently guards the unbind call with an
+`hBinding` check, while the pinned Wine implementation calls the unbind routine
+unconditionally.
+
+The test uses a generated interpreted client stub so that the normal generic
+binding path is exercised. Its bind routine always returns `NULL`; the test
+requires one bind call and zero unbind calls.
+
+Current semantic classification: `WINDOWS_COMPATIBILITY`.
+
+Reference:
+https://learn.microsoft.com/en-us/windows/win32/midl/handle
+
+Do not remove the ReactOS guard to match Wine. If the test demonstrates the same
+failure in current Wine, the preferable direction is a Wine fix or an equivalent
+common implementation that preserves the documented Windows behavior.
 
 ## Review record
 
