@@ -19,6 +19,7 @@ set(IDL_FLAGS ${IDL_FLAGS} --prefix-server=s_ -Os --prefix-client=)
 add_rpc_files(client explicit_handle.idl)
 add_rpc_files(server explicit_handle.idl)
 set(IDL_FLAGS ${OLD_IDL_FLAGS})
+add_rpc_files(client generic_handle.idl)
 set(IDL_FLAGS ${IDL_FLAGS} --prefix-server=s_ -Oicf --prefix-client=interp_)
 add_rpc_files(client server_interp.idl)
 add_rpc_files(server server_interp.idl)
@@ -28,6 +29,7 @@ add_rpcproxy_files(cstub.idl)
 list(APPEND SOURCE
     cstub.c
     generated.c
+    generic_handle.c
     ndr_marshall.c
     ndr_union.c
     rpc.c
@@ -37,6 +39,7 @@ list(APPEND SOURCE
     ${CMAKE_CURRENT_BINARY_DIR}/cstub_p.c
     ${CMAKE_CURRENT_BINARY_DIR}/explicit_handle_c.c
     ${CMAKE_CURRENT_BINARY_DIR}/explicit_handle_s.c
+    ${CMAKE_CURRENT_BINARY_DIR}/generic_handle_c.c
     ${CMAKE_CURRENT_BINARY_DIR}/proxy.dlldata.c
     ${CMAKE_CURRENT_BINARY_DIR}/server_c.c
     ${CMAKE_CURRENT_BINARY_DIR}/server_s.c
