@@ -1,0 +1,22 @@
+/*
+ * RPC generic binding handle conformance interface.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ */
+
+#pragma makedep client
+
+[
+    uuid(00000000-4114-0704-2301-000000000003),
+    explicit_handle,
+    version(1.0)
+]
+interface RPCGenericHandle
+{
+    typedef [handle] const char *generic_handle_t;
+
+    int generic_handle_call([in] generic_handle_t binding, [in] int value);
+}
