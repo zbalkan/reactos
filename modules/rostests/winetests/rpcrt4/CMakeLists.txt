@@ -29,6 +29,7 @@ list(APPEND SOURCE
     cstub.c
     generated.c
     ndr_marshall.c
+    ndr_union.c
     rpc.c
     rpc_async.c
     server.c
