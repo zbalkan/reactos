@@ -2632,10 +2632,20 @@ ProbeAndCaptureLargeString(
     }
     _SEH2_END
 
+    lstrTemp.MaximumLength = 0;
+
     if (lstrTemp.Length != 0)
     {
+        /* Leave room for UNICODE_NULL; MaximumLength is a 31-bit field */
+        if (lstrTemp.Length > MAXLONG - sizeof(UNICODE_NULL))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
         /* Allocate a buffer from paged pool */
-        pvBuffer = ExAllocatePoolWithTag(PagedPool, lstrTemp.Length, TAG_STRING);
+        pvBuffer = ExAllocatePoolWithTag(PagedPool,
+                                         lstrTemp.Length + sizeof(UNICODE_NULL),
+                                         TAG_STRING);
         if (!pvBuffer)
         {
             return STATUS_NO_MEMORY;
@@ -2654,12 +2664,17 @@ ProbeAndCaptureLargeString(
             _SEH2_YIELD(return _SEH2_GetExceptionCode();)
         }
         _SEH2_END
+
+        /* Callers use the buffer as a C string (lpszName, _wcsicmp) */
+        ((PWCHAR)pvBuffer)[lstrTemp.Length / sizeof(WCHAR)] = UNICODE_NULL;
+        lstrTemp.MaximumLength = lstrTemp.Length + sizeof(UNICODE_NULL);
     }
 
-    /* Set the output string */
+    /* Set the output string; user32 always passes UTF-16 here */
     plstrSafe->Buffer = pvBuffer;
     plstrSafe->Length = lstrTemp.Length;
-    plstrSafe->MaximumLength = lstrTemp.Length;
+    plstrSafe->MaximumLength = lstrTemp.MaximumLength;
+    plstrSafe->bAnsi = FALSE;
 
     return STATUS_SUCCESS;
 }
