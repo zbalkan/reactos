@@ -397,6 +397,7 @@ CMergedFolder::~CMergedFolder()
 {
     if (m_UserLocalPidl) ILFree(m_UserLocalPidl);
     if (m_AllUsersPidl)  ILFree(m_AllUsersPidl);
+    if (m_shellPidl)     ILFree(m_shellPidl);
 }
 
 // IAugmentedShellFolder2
@@ -464,13 +465,18 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::ParseDisplayName(
 {
     HRESULT hr;
     LocalPidlInfo info;
+    SFGAOF sfgaoRequested;
 
     if (!ppidl)
         return E_FAIL;
 
+    *ppidl = NULL;
+
     if (pchEaten)
         *pchEaten = 0;
 
+    // The caller passes in the attributes it wants to query
+    sfgaoRequested = pdwAttributes ? *pdwAttributes : 0;
     if (pdwAttributes)
         *pdwAttributes = 0;
 
@@ -482,13 +488,26 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::ParseDisplayName(
         return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
     }
 
+    if (pdwAttributes && sfgaoRequested)
+    {
+        SFGAOF sfgao = sfgaoRequested;
+        PCUITEMID_CHILD pidlChild = info.pidl;
+        hr = info.parent->GetAttributesOf(1, &pidlChild, &sfgao);
+        if (FAILED_UNEXPECTEDLY(hr))
+            return hr;
+        *pdwAttributes = sfgao;
+    }
+
     *ppidl = ILClone(info.pidl);
+    if (!*ppidl)
+    {
+        if (pdwAttributes)
+            *pdwAttributes = 0;
+        return E_OUTOFMEMORY;
+    }
 
     if (pchEaten)
         *pchEaten = lstrlenW(info.parseName);
-
-    if (pdwAttributes)
-        *pdwAttributes = info.parent->GetAttributesOf(1, (LPCITEMIDLIST*)ppidl, pdwAttributes);
 
     return S_OK;
 }
@@ -597,24 +616,33 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::GetAttributesOf(
 
     TRACE("GetAttributesOf\n");
 
-    for (int i = 0; i < (int)cidl; i++)
+    if (cidl && (!apidl || !rgfInOut))
+        return E_INVALIDARG;
+
+    if (!cidl)
+        return S_OK;
+
+    // rgfInOut is a single mask shared by all the items, not an array.
+    // Query each item with the requested attributes and return the
+    // attributes that are common to all of them.
+    SFGAOF sfgaoRequested = *rgfInOut;
+    SFGAOF sfgaoCommon = ~(SFGAOF)0;
+    for (UINT i = 0; i < cidl; i++)
     {
-        LPCITEMIDLIST pidl = apidl[i];
-
-        hr = m_EnumSource->FindPidlInList(NULL, pidl, &info);
+        hr = m_EnumSource->FindPidlInList(NULL, apidl[i], &info);
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
 
-        pidl = info.pidl;
-
-        SFGAOF * pinOut1 = rgfInOut ? rgfInOut + i : NULL;
-
-        hr = info.parent->GetAttributesOf(1, &pidl, pinOut1);
-
+        SFGAOF sfgao = sfgaoRequested;
+        PCUITEMID_CHILD pidlChild = info.pidl;
+        hr = info.parent->GetAttributesOf(1, &pidlChild, &sfgao);
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
+
+        sfgaoCommon &= sfgao;
     }
 
+    *rgfInOut = sfgaoCommon;
     return S_OK;
 }
 
@@ -631,30 +659,47 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::GetUIObjectOf(
 
     TRACE("GetUIObjectOf\n");
 
-    for (int i = 0; i < (int)cidl; i++)
+    if (!ppvOut)
+        return E_POINTER;
+    *ppvOut = NULL;
+
+    if (!cidl || !apidl)
+        return E_INVALIDARG;
+
+    // ppvOut receives a single object that represents the whole selection.
+    // Translate the items to their source pidls; this only works when
+    // all of them come from the same source folder.
+    CComHeapPtr<PCUITEMID_CHILD> apidlSourceAlloc;
+    if (!apidlSourceAlloc.Allocate(cidl))
+        return E_OUTOFMEMORY;
+    PCUITEMID_CHILD *apidlSource = apidlSourceAlloc;
+
+    IShellFolder *psfSource = NULL;
+    for (UINT i = 0; i < cidl; i++)
     {
-        LPCITEMIDLIST pidl = apidl[i];
+        TRACE("Processing GetUIObjectOf item %u of %u...\n", i, cidl);
 
-        TRACE("Processing GetUIObjectOf item %d of %u...\n", i, cidl);
-
-        hr = m_EnumSource->FindPidlInList(hwndOwner, pidl, &info);
+        hr = m_EnumSource->FindPidlInList(hwndOwner, apidl[i], &info);
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
-
-        pidl = info.pidl;
 
         TRACE("FindPidlInList succeeded with parent %p and pidl { db=%d }\n", info.parent, info.pidl->mkid.cb);
 
-        UINT * pinOut1 = prgfInOut ? prgfInOut+i : NULL;
-        void** ppvOut1 = ppvOut ? ppvOut + i : NULL;
+        if (!psfSource)
+        {
+            psfSource = info.parent;
+        }
+        else if (psfSource != info.parent)
+        {
+            // FIXME: Build an aggregate object for selections that span both sources
+            WARN("Selection spans more than one source folder\n");
+            return E_FAIL;
+        }
 
-        hr = info.parent->GetUIObjectOf(hwndOwner, 1, &pidl, riid, pinOut1, ppvOut1);
-
-        if (FAILED_UNEXPECTEDLY(hr))
-            return hr;
+        apidlSource[i] = info.pidl;
     }
 
-    return S_OK;
+    return psfSource->GetUIObjectOf(hwndOwner, cidl, apidlSource, riid, prgfInOut, ppvOut);
 }
 
 HRESULT STDMETHODCALLTYPE CMergedFolder::GetDisplayNameOf(
@@ -699,16 +744,33 @@ HRESULT STDMETHODCALLTYPE CMergedFolder::GetClassID(CLSID *lpClassId)
 // IPersistFolder
 HRESULT STDMETHODCALLTYPE CMergedFolder::Initialize(PCIDLIST_ABSOLUTE pidl)
 {
-    m_shellPidl = ILClone(pidl);
+    LPITEMIDLIST pidlNew = NULL;
+    if (pidl)
+    {
+        pidlNew = ILClone(pidl);
+        if (!pidlNew)
+            return E_OUTOFMEMORY;
+    }
+
+    if (m_shellPidl)
+        ILFree(m_shellPidl);
+    m_shellPidl = pidlNew;
     return S_OK;
 }
 
 // IPersistFolder2
 HRESULT STDMETHODCALLTYPE CMergedFolder::GetCurFolder(PIDLIST_ABSOLUTE * pidl)
 {
-    if (pidl)
-        *pidl = m_shellPidl;
-    return S_OK;
+    if (!pidl)
+        return E_POINTER;
+
+    // The caller owns the returned pidl
+    *pidl = NULL;
+    if (!m_shellPidl)
+        return S_FALSE;
+
+    *pidl = ILClone(m_shellPidl);
+    return *pidl ? S_OK : E_OUTOFMEMORY;
 }
 
 // IShellFolder2
