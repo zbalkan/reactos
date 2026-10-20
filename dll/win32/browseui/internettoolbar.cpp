@@ -454,14 +454,15 @@ static HRESULT BindToDesktop(LPCITEMIDLIST pidl, IShellFolder ** ppsfResult)
 static HRESULT GetFavoritesFolder(IShellFolder ** ppsfFavorites, LPITEMIDLIST * ppidl)
 {
     HRESULT hr;
-    LPITEMIDLIST pidlUserFavorites;
-    LPITEMIDLIST pidlCommonFavorites;
+    CComHeapPtr<ITEMIDLIST> pidlUserFavorites;
+    CComHeapPtr<ITEMIDLIST> pidlCommonFavorites;
     CComPtr<IShellFolder> psfUserFavorites;
     CComPtr<IShellFolder> psfCommonFavorites;
     CComPtr<IAugmentedShellFolder> pasf;
 
-    if (ppsfFavorites)
-        *ppsfFavorites = NULL;
+    if (!ppsfFavorites)
+        return E_POINTER;
+    *ppsfFavorites = NULL;
 
     if (ppidl)
         *ppidl = NULL;
@@ -476,8 +477,9 @@ static HRESULT GetFavoritesFolder(IShellFolder ** ppsfFavorites, LPITEMIDLIST * 
             return hr;
 
         TRACE("COMMON favorites obtained.\n");
-        *ppidl = pidlCommonFavorites;
         hr = BindToDesktop(pidlCommonFavorites, ppsfFavorites);
+        if (SUCCEEDED(hr) && ppidl)
+            *ppidl = pidlCommonFavorites.Detach();
         return hr;
     }
 
@@ -485,8 +487,9 @@ static HRESULT GetFavoritesFolder(IShellFolder ** ppsfFavorites, LPITEMIDLIST * 
     if (FAILED_UNEXPECTEDLY(hr))
     {
         WARN("Failed to get the COMMON favorites folder. Will use only the USER contents.\n");
-        *ppidl = pidlCommonFavorites;
         hr = BindToDesktop(pidlUserFavorites, ppsfFavorites);
+        if (SUCCEEDED(hr) && ppidl)
+            *ppidl = pidlUserFavorites.Detach();
         return hr;
     }
 
@@ -503,10 +506,11 @@ static HRESULT GetFavoritesFolder(IShellFolder ** ppsfFavorites, LPITEMIDLIST * 
     hr = CMergedFolder_CreateInstance(IID_PPV_ARG(IAugmentedShellFolder, &pasf));
     if (FAILED_UNEXPECTEDLY(hr))
     {
+        // Fall back to the user folder alone
         *ppsfFavorites = psfUserFavorites.Detach();
-        *ppidl = pidlUserFavorites;
-        ILFree(pidlCommonFavorites);
-        return hr;
+        if (ppidl)
+            *ppidl = pidlUserFavorites.Detach();
+        return S_OK;
     }
 
     hr = pasf->AddNameSpace(NULL, psfUserFavorites, pidlUserFavorites, 0xFF00);
@@ -517,15 +521,9 @@ static HRESULT GetFavoritesFolder(IShellFolder ** ppsfFavorites, LPITEMIDLIST * 
     if (FAILED_UNEXPECTEDLY(hr))
         return hr;
 
-    hr = pasf->QueryInterface(IID_PPV_ARG(IShellFolder, ppsfFavorites));
-    pasf.Release();
-
-    // TODO: obtain the folder's PIDL
-
-    ILFree(pidlCommonFavorites);
-    ILFree(pidlUserFavorites);
-
-    return hr;
+    // TODO: obtain the merged folder's PIDL. *ppidl stays NULL: neither source PIDL
+    // identifies the merged folder.
+    return pasf->QueryInterface(IID_PPV_ARG(IShellFolder, ppsfFavorites));
 }
 
 HRESULT STDMETHODCALLTYPE CMenuCallback::GetObject(LPSMDATA psmd, REFIID riid, void **ppvObject)
