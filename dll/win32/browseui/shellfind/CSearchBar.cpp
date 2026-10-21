@@ -173,6 +173,8 @@ static LOCATIONITEM* GetLocalDisksLocations()
 
 CSearchBar::CSearchBar() :
     m_pSite(NULL),
+    m_dwBrowserEventsCookie(0),
+    m_dwSearchEventsCookie(0),
     m_RealItemIndex(0),
     m_bVisible(FALSE)
 {
@@ -238,11 +240,7 @@ LRESULT CSearchBar::OnInitDialog(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &
         return FALSE;
 
     // Subscribe to navigation events
-    CComPtr<IShellBrowser> pShellBrowser;
-    hResult = IUnknown_QueryService(m_pSite, SID_SShellBrowser, IID_PPV_ARG(IShellBrowser, &pShellBrowser));
-    DWORD dwAdviseCookie;
-    if (SUCCEEDED(hResult))
-        AtlAdvise(pShellBrowser, static_cast<IDispatch *>(this), DIID_DWebBrowserEvents, &dwAdviseCookie);
+    SubscribeToBrowserEvents();
 
     // Invoke the navigate event in case a search results folder is already open
     DISPPARAMS params = {0};
@@ -287,8 +285,8 @@ HRESULT CSearchBar::GetSearchResultsFolder(IShellBrowser **ppShellBrowser, HWND 
     if (!ppShellFolder)
         ppShellFolder = &pShellFolder;
     hr = pFolderView->GetFolder(IID_PPV_ARG(IShellFolder, ppShellFolder));
-    if (FAILED(hr) || !pShellFolder)
-        return hr;
+    if (FAILED(hr) || !*ppShellFolder)
+        return FAILED(hr) ? hr : E_FAIL;
 
     CLSID clsid;
     hr = IUnknown_GetClassID(*ppShellFolder, &clsid);
@@ -625,8 +623,13 @@ HRESULT STDMETHODCALLTYPE CSearchBar::SetSite(IUnknown *pUnkSite)
     TRACE("SetSite called \n");
     if (!pUnkSite)
     {
+        // Release the site and every event subscription, which also breaks the
+        // reference cycles with the results folder and the shell browser
+        UnsubscribeFromSearchEvents();
+        UnsubscribeFromBrowserEvents();
         DestroyWindow();
         m_hWnd = NULL;
+        m_pSite.Release();
         return S_OK;
     }
 
@@ -637,12 +640,20 @@ HRESULT STDMETHODCALLTYPE CSearchBar::SetSite(IUnknown *pUnkSite)
         return E_INVALIDARG;
     }
 
+    // Events of the previous site's browser and results folder no longer apply
+    UnsubscribeFromSearchEvents();
+    UnsubscribeFromBrowserEvents();
+
     m_pSite = pUnkSite;
 
     if (m_hWnd)
     {
         // Change its parent
         SetParent(parentWnd);
+
+        // OnInitDialog does not run again, so subscribe to the new site here
+        SubscribeToBrowserEvents();
+        TrySubscribeToSearchEvents();
     }
     else
     {
@@ -656,8 +667,10 @@ HRESULT STDMETHODCALLTYPE CSearchBar::GetSite(REFIID riid, void **ppvSite)
 {
     if (!ppvSite)
         return E_POINTER;
-    *ppvSite = m_pSite;
-    return S_OK;
+    *ppvSite = NULL;
+    if (!m_pSite)
+        return E_FAIL;
+    return m_pSite->QueryInterface(riid, ppvSite);
 }
 
 
@@ -773,18 +786,66 @@ HRESULT CSearchBar::GetSearchFolderControl(IROSFindFolderControl **ppControl)
     return pShellFolder->QueryInterface(IID_IROSFindFolderControl, (void **)ppControl);
 }
 
+void CSearchBar::UnsubscribeFromSearchEvents()
+{
+    if (!m_pSearchEvents)
+        return;
+    AtlUnadvise(m_pSearchEvents, DIID_DSearchCommandEvents, m_dwSearchEventsCookie);
+    m_pSearchEvents.Release();
+    m_dwSearchEventsCookie = 0;
+}
+
+void CSearchBar::SubscribeToBrowserEvents()
+{
+    UnsubscribeFromBrowserEvents();
+
+    CComPtr<IShellBrowser> pShellBrowser;
+    HRESULT hr = IUnknown_QueryService(m_pSite, SID_SShellBrowser,
+                                       IID_PPV_ARG(IShellBrowser, &pShellBrowser));
+    if (FAILED(hr))
+        return;
+
+    hr = AtlAdvise(pShellBrowser, static_cast<IDispatch *>(this), DIID_DWebBrowserEvents,
+                   &m_dwBrowserEventsCookie);
+    if (SUCCEEDED(hr))
+        m_pBrowserEvents = pShellBrowser;
+}
+
+void CSearchBar::UnsubscribeFromBrowserEvents()
+{
+    if (!m_pBrowserEvents)
+        return;
+    AtlUnadvise(m_pBrowserEvents, DIID_DWebBrowserEvents, m_dwBrowserEventsCookie);
+    m_pBrowserEvents.Release();
+    m_dwBrowserEventsCookie = 0;
+}
+
 HRESULT CSearchBar::TrySubscribeToSearchEvents()
 {
     CComPtr<IShellFolder> pShellFolder;
     HRESULT hr = GetSearchResultsFolder(NULL, NULL, &pShellFolder);
     if (FAILED(hr))
+    {
+        // Navigated away from the results folder
+        UnsubscribeFromSearchEvents();
         return hr;
+    }
 
-    DWORD fAdviseCookie;
-    hr = AtlAdvise(pShellFolder, static_cast<IDispatch *>(this), DIID_DSearchCommandEvents, &fAdviseCookie);
+    // Stay subscribed to the same results folder; navigation events repeat
+    CComPtr<IUnknown> pUnkFolder;
+    hr = pShellFolder->QueryInterface(IID_PPV_ARG(IUnknown, &pUnkFolder));
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+    if (m_pSearchEvents == pUnkFolder)
+        return S_OK;
+
+    UnsubscribeFromSearchEvents();
+    hr = AtlAdvise(pUnkFolder, static_cast<IDispatch *>(this), DIID_DSearchCommandEvents,
+                   &m_dwSearchEventsCookie);
     if (FAILED_UNEXPECTEDLY(hr))
         return hr;
 
+    m_pSearchEvents = pUnkFolder;
     return S_OK;
 }
 

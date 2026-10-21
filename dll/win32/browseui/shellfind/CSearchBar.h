@@ -24,6 +24,10 @@ private:
     // *** BaseBarSite information ***
     CComPtr<IUnknown> m_pSite;
     CComPtr<IAddressEditBox> m_AddressEditBox;
+    CComPtr<IUnknown> m_pBrowserEvents;     // Source of the DWebBrowserEvents we advised
+    DWORD m_dwBrowserEventsCookie;
+    CComPtr<IUnknown> m_pSearchEvents;      // Results folder whose DSearchCommandEvents we advised
+    DWORD m_dwSearchEventsCookie;
     INT_PTR m_RealItemIndex;
     BOOL m_bVisible;
 
@@ -31,6 +35,9 @@ private:
     LOCATIONITEM* GetAddressEditBoxLocations(WCHAR *szPath);
     void SetSearchInProgress(BOOL bInProgress);
     HRESULT TrySubscribeToSearchEvents();
+    void UnsubscribeFromSearchEvents();
+    void SubscribeToBrowserEvents();
+    void UnsubscribeFromBrowserEvents();
     HRESULT GetSearchFolderControl(IROSFindFolderControl **ppControl);
     void TrySetFocus(UINT Source);
 
