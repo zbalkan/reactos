@@ -7,6 +7,7 @@ list(APPEND SOURCE
     CFSFolder.cpp
     CheckEscapes.cpp
     CIDLData.cpp
+    CMergedFolder.cpp
     CMyComputer.cpp
     CommandLineToArgvW.cpp
     CShellDesktop.cpp

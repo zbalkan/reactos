@@ -8,6 +8,7 @@ extern void func_Control_RunDLLW(void);
 extern void func_CFSFolder(void);
 extern void func_CheckEscapes(void);
 extern void func_CIDLData(void);
+extern void func_CMergedFolder(void);
 extern void func_CMyComputer(void);
 extern void func_CommandLineToArgvW(void);
 extern void func_CShellDesktop(void);
@@ -76,6 +77,7 @@ const struct test winetest_testlist[] =
     { "CFSFolder", func_CFSFolder },
     { "CheckEscapes", func_CheckEscapes },
     { "CIDLData", func_CIDLData },
+    { "CMergedFolder", func_CMergedFolder },
     { "CMyComputer", func_CMyComputer },
     { "CommandLineToArgvW", func_CommandLineToArgvW },
     { "CShellDesktop", func_CShellDesktop },
