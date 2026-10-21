@@ -31,6 +31,7 @@ private:
     LOCATIONITEM* GetAddressEditBoxLocations(WCHAR *szPath);
     void SetSearchInProgress(BOOL bInProgress);
     HRESULT TrySubscribeToSearchEvents();
+    HRESULT GetSearchFolderControl(IROSFindFolderControl **ppControl);
     void TrySetFocus(UINT Source);
 
     // *** ATL event handlers ***

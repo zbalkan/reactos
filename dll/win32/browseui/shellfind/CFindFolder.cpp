@@ -143,12 +143,13 @@ static const FolderViewColumns g_ColumnDefs[] =
 
 CFindFolder::CFindFolder() :
     m_pidl(NULL),
-    m_hStopEvent(NULL)
+    m_pSearchData(NULL)
 {
 }
 
 CFindFolder::~CFindFolder()
 {
+    EndSearch(FALSE);
     ILFree(m_pidl);
 }
 
@@ -274,10 +275,18 @@ HDPA CFindFolder::CreateAbsolutePidlArray(UINT cidl, PCUITEMID_CHILD_ARRAY apidl
     return hDpa;
 }
 
+/*
+ * One search session. The results folder holds a reference to its active session
+ * and the worker thread holds another; the session never references the folder.
+ * The worker only queues results and status text here and posts a wake-up message
+ * without payload; the owner thread drains the queue. The last Release frees
+ * everything, so neither side depends on the other's lifetime.
+ */
 struct _SearchData
 {
-    HWND hwnd;
-    HANDLE hStopEvent;
+    HWND hwnd;              // Window to wake up; never used to pass data
+    UINT uWakeMsg;          // Registered on the owner thread before the worker starts
+    HANDLE hStopEvent;      // Owned by the session
     LOCATIONITEM *pPaths;
     CStringW szFileName;
     CStringA szQueryA;
@@ -285,15 +294,100 @@ struct _SearchData
     CStringW szQueryU16BE;
     CStringA szQueryU8;
     BOOL SearchHidden;
-    CComPtr<CFindFolder> pFindFolder;
     UINT SearchId;
 
-    explicit _SearchData(UINT InitSearchId) : SearchId(InitSearchId) {}
+    // Protected by Lock
+    CRITICAL_SECTION Lock;
+    CSimpleArray<LPWSTR> Results;
+    LPWSTR pszStatus;
+    BOOL bDone;
+    UINT uTotalFound;
+
+    LONG fWakePending;
+    LONG cRef;
+
+    explicit _SearchData(UINT InitSearchId) :
+        hwnd(NULL),
+        uWakeMsg(0),
+        hStopEvent(NULL),
+        pPaths(NULL),
+        SearchHidden(FALSE),
+        SearchId(InitSearchId),
+        pszStatus(NULL),
+        bDone(FALSE),
+        uTotalFound(0),
+        fWakePending(FALSE),
+        cRef(1)
+    {
+        InitializeCriticalSection(&Lock);
+    }
+
     ~_SearchData()
     {
         FreeList(pPaths);
+        for (int i = 0; i < Results.GetSize(); ++i)
+            SHFree(Results[i]);
+        SHFree(pszStatus);
+        if (hStopEvent)
+            CloseHandle(hStopEvent);
+        DeleteCriticalSection(&Lock);
+    }
+
+    void AddRef()
+    {
+        InterlockedIncrement(&cRef);
+    }
+
+    void Release()
+    {
+        if (!InterlockedDecrement(&cRef))
+            delete this;
+    }
+
+    BOOL IsCanceled() const
+    {
+        return WaitForSingleObject(hStopEvent, 0) != WAIT_TIMEOUT;
     }
 };
+
+// Only called on the thread that owns the results view; the worker uses _SearchData::uWakeMsg
+UINT CFindFolder::GetSearchUpdateMessage()
+{
+    static UINT s_uMsg = 0;
+    if (!s_uMsg)
+        s_uMsg = RegisterWindowMessageW(L"ReactOS.FindFolder.SearchUpdate");
+    return s_uMsg;
+}
+
+// Paths longer than MAX_PATH cannot be searched, so they are rejected as invalid
+static HRESULT DuplicateLocationList(const LOCATIONITEM *pItems, LOCATIONITEM **ppList)
+{
+    LOCATIONITEM *pHead = NULL, **ppNext = &pHead;
+    *ppList = NULL;
+    for (; pItems; pItems = pItems->pNext)
+    {
+        size_t cch;
+        if (FAILED(StringCchLengthW(pItems->szPath, MAX_PATH, &cch)))
+        {
+            FreeList(pHead);
+            return E_INVALIDARG;
+        }
+        cch++;
+        SIZE_T cbItem = FIELD_OFFSET(LOCATIONITEM, szPath) + cch * sizeof(WCHAR);
+        LOCATIONITEM *pItem = (LOCATIONITEM *)CoTaskMemAlloc(cbItem);
+        if (!pItem)
+        {
+            FreeList(pHead);
+            return E_OUTOFMEMORY;
+        }
+        pItem->pNext = NULL;
+        CopyMemory(pItem->szPath, pItems->szPath, cch * sizeof(WCHAR));
+        *ppNext = pItem;
+        ppNext = &pItem->pNext;
+    }
+    *ppList = pHead;
+    return S_OK;
+}
 
 template<typename TChar, typename TString, int (&StrNCmp)(const TChar *, const TChar *, size_t)>
 static const TChar* StrStrN(const TChar *lpFirst, const TString &lpSrch, UINT cchMax)
@@ -540,18 +634,51 @@ static BOOL AttribHiddenMatch(DWORD FileAttributes, _SearchData *pSearchData)
     return FALSE;
 }
 
-static inline void PostUpdate(UINT Msg, LPCWSTR pszText, const _SearchData &Data)
+// Called on the worker thread. Posts one wake-up at a time; the message carries no data.
+static void WakeOwner(_SearchData *pSearchData)
+{
+    if (!InterlockedExchange(&pSearchData->fWakePending, TRUE))
+    {
+        if (!PostMessageW(pSearchData->hwnd, pSearchData->uWakeMsg, pSearchData->SearchId, 0))
+            InterlockedExchange(&pSearchData->fWakePending, FALSE);
+    }
+}
+
+static void QueueResult(_SearchData *pSearchData, LPCWSTR pszPath)
 {
     LPWSTR pszDup;
-    if (FAILED(SHStrDupW(pszText, &pszDup)))
+    if (FAILED(SHStrDupW(pszPath, &pszDup)))
         return;
-    if (!PostMessageW(Data.hwnd, Msg, Data.SearchId, (LPARAM)pszDup))
+
+    EnterCriticalSection(&pSearchData->Lock);
+    BOOL bAdded = pSearchData->Results.Add(pszDup);
+    LeaveCriticalSection(&pSearchData->Lock);
+
+    if (!bAdded)
         SHFree(pszDup);
+    else
+        WakeOwner(pSearchData);
+}
+
+// Only the latest status text is kept
+static void QueueStatus(_SearchData *pSearchData, LPCWSTR pszStatus)
+{
+    LPWSTR pszDup;
+    if (FAILED(SHStrDupW(pszStatus, &pszDup)))
+        return;
+
+    EnterCriticalSection(&pSearchData->Lock);
+    LPWSTR pszOld = pSearchData->pszStatus;
+    pSearchData->pszStatus = pszDup;
+    LeaveCriticalSection(&pSearchData->Lock);
+
+    SHFree(pszOld);
+    WakeOwner(pSearchData);
 }
 
 static UINT RecursiveFind(LPCWSTR lpPath, _SearchData *pSearchData)
 {
-    if (WaitForSingleObject(pSearchData->hStopEvent, 0) != WAIT_TIMEOUT)
+    if (pSearchData->IsCanceled())
         return 0;
 
     WCHAR szPath[MAX_PATH];
@@ -567,6 +694,10 @@ static UINT RecursiveFind(LPCWSTR lpPath, _SearchData *pSearchData)
         bMoreFiles && hFindFile != INVALID_HANDLE_VALUE;
         bMoreFiles = FindNextFileW(hFindFile, &FindData))
     {
+        // Check for cancellation on every entry, not only per directory
+        if (pSearchData->IsCanceled())
+            break;
+
 #define IS_DOTS(psz) ((psz)[0] == L'.' && ((psz)[1] == 0 || ((psz)[1] == L'.' && (psz)[2] == 0)))
         if (IS_DOTS(FindData.cFileName))
             continue;
@@ -582,7 +713,7 @@ static UINT RecursiveFind(LPCWSTR lpPath, _SearchData *pSearchData)
                 FileNameMatch(FindData.cFileName, pSearchData) &&
                 AttribHiddenMatch(FindData.dwFileAttributes, pSearchData))
             {
-                PostUpdate(WM_SEARCH_ADD_RESULT, szPath, *pSearchData);
+                QueueResult(pSearchData, szPath);
                 uTotalFound++;
             }
             // Do not follow junctions and directory symbolic links: they can point to an
@@ -590,16 +721,17 @@ static UINT RecursiveFind(LPCWSTR lpPath, _SearchData *pSearchData)
             if (!(FindData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
             {
                 status.Format(IDS_SEARCH_FOLDER, FindData.cFileName);
-                PostUpdate(WM_SEARCH_UPDATE_STATUS, status.GetBuffer(), *pSearchData);
+                QueueStatus(pSearchData, status);
 
                 uTotalFound += RecursiveFind(szPath, pSearchData);
             }
         }
         else if (FileNameMatch(FindData.cFileName, pSearchData)
                 && AttribHiddenMatch(FindData.dwFileAttributes, pSearchData)
+                && !pSearchData->IsCanceled()
                 && ContentsMatch(szPath, pSearchData))
         {
-            PostUpdate(WM_SEARCH_ADD_RESULT, szPath, *pSearchData);
+            QueueResult(pSearchData, szPath);
             uTotalFound++;
         }
     }
@@ -610,38 +742,43 @@ static UINT RecursiveFind(LPCWSTR lpPath, _SearchData *pSearchData)
     return uTotalFound;
 }
 
+struct SearchThreadParams
+{
+    _SearchData *pSearchData;
+    HMODULE hModule; // Keeps this DLL loaded until the thread exits
+};
+
 DWORD WINAPI CFindFolder::SearchThreadProc(LPVOID lpParameter)
 {
-    _SearchData *data = static_cast<_SearchData*>(lpParameter);
+    SearchThreadParams *pParams = static_cast<SearchThreadParams*>(lpParameter);
+    _SearchData *data = pParams->pSearchData;
+    HMODULE hModule = pParams->hModule;
+    delete pParams;
 
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-
-    HRESULT hrCoInit = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-
-    data->pFindFolder->NotifyConnections(DISPID_SEARCHSTART);
 
     UINT uTotalFound = 0;
     for (LOCATIONITEM *pLocation = data->pPaths; pLocation; pLocation = pLocation->pNext)
     {
+        if (data->IsCanceled())
+            break;
         uTotalFound += RecursiveFind(pLocation->szPath, data);
     }
 
-    data->pFindFolder->NotifyConnections(DISPID_SEARCHCOMPLETE);
+    EnterCriticalSection(&data->Lock);
+    data->bDone = TRUE;
+    data->uTotalFound = uTotalFound;
+    LeaveCriticalSection(&data->Lock);
+    WakeOwner(data);
 
-    CStringW status;
-    status.Format(IDS_SEARCH_FILES_FOUND, uTotalFound);
-    PostUpdate(WM_SEARCH_UPDATE_STATUS, status.GetBuffer(), *data);
-    ::SendMessageW(data->hwnd, WM_SEARCH_STOP, 0, 0);
+    data->Release();
 
-    CloseHandle(data->hStopEvent);
-    delete data;
-
-    if (SUCCEEDED(hrCoInit))
-        CoUninitialize();
-
+    if (hModule)
+        FreeLibraryAndExitThread(hModule, 0);
     return 0;
 }
 
+// Must only be called on the thread that owns the results view
 void CFindFolder::NotifyConnections(DISPID id)
 {
     DISPPARAMS dispatchParams = {0};
@@ -659,26 +796,69 @@ void CFindFolder::NotifyConnections(DISPID id)
     }
 }
 
-LRESULT CFindFolder::StartSearch(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled)
+void CFindFolder::EndSearch(BOOL bNotify)
+{
+    _SearchData *pSearchData = m_pSearchData;
+    if (!pSearchData)
+        return;
+
+    m_pSearchData = NULL;
+    SetEvent(pSearchData->hStopEvent);
+    pSearchData->Release();
+
+    if (bNotify)
+        NotifyConnections(DISPID_SEARCHABORT);
+}
+
+// *** IROSFindFolderControl methods ***
+STDMETHODIMP CFindFolder::BeginSearch(const SearchStart *pSearchParams)
 {
     HKEY hkey;
     DWORD size = sizeof(DWORD);
     DWORD result;
     DWORD SearchHiddenValue = 0;
 
-    if (!lParam)
-        return 0;
+    if (!pSearchParams || !pSearchParams->pPaths)
+        return E_INVALIDARG;
+    if (FAILED(StringCchLengthW(pSearchParams->szFileName, MAX_PATH, NULL)) ||
+        FAILED(StringCchLengthW(pSearchParams->szQuery, MAX_PATH, NULL)))
+    {
+        return E_INVALIDARG;
+    }
+
+    // The caller keeps ownership of its request; take a copy of everything we need
+    LOCATIONITEM *pPaths;
+    HRESULT hr = DuplicateLocationList(pSearchParams->pPaths, &pPaths);
+    if (FAILED(hr))
+        return hr;
+    if (!m_hWnd || !m_shellFolderView)
+    {
+        FreeList(pPaths);
+        return E_UNEXPECTED;
+    }
+
+    // A new search replaces the previous one
+    EndSearch(FALSE);
 
     // Clear all previous search results
     UINT uItemIndex;
     m_shellFolderView->RemoveObject(NULL, &uItemIndex);
 
     _SearchData* pSearchData = new _SearchData(++m_SearchId);
-    pSearchData->pFindFolder = this;
+    if (!pSearchData)
+    {
+        FreeList(pPaths);
+        return E_OUTOFMEMORY;
+    }
     pSearchData->hwnd = m_hWnd;
-
-    SearchStart *pSearchParams = (SearchStart *) lParam;
-    pSearchData->pPaths = pSearchParams->pPaths;
+    pSearchData->uWakeMsg = GetSearchUpdateMessage();
+    pSearchData->pPaths = pPaths;
+    pSearchData->hStopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!pSearchData->hStopEvent)
+    {
+        pSearchData->Release();
+        return E_OUTOFMEMORY;
+    }
     pSearchData->szFileName = pSearchParams->szFileName;
     pSearchData->szQueryA = pSearchParams->szQuery;
     pSearchData->szQueryW = pSearchParams->szQuery;
@@ -713,7 +893,6 @@ LRESULT CFindFolder::StartSearch(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &
     }
 
     pSearchData->SearchHidden = pSearchParams->SearchHidden;
-    SHFree(pSearchParams);
 
     TRACE("pSearchParams->SearchHidden is '%d'.\n", pSearchData->SearchHidden);
 
@@ -742,66 +921,103 @@ LRESULT CFindFolder::StartSearch(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &
         ERR("RegOpenKey for \"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\" Failed.\n");
     }
 
-    if (m_hStopEvent)
-        SetEvent(m_hStopEvent);
-    pSearchData->hStopEvent = m_hStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-
-    if (!SHCreateThread(SearchThreadProc, pSearchData, 0, NULL))
+    SearchThreadParams *pParams = new SearchThreadParams;
+    if (!pParams)
     {
-        if (pSearchData->hStopEvent)
-        {
-            CloseHandle(pSearchData->hStopEvent);
-            m_hStopEvent = NULL;
-        }
-        delete pSearchData;
+        pSearchData->Release();
+        return E_OUTOFMEMORY;
     }
-    return 0;
+    pParams->pSearchData = pSearchData;
+    pParams->hModule = NULL;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                       (LPCWSTR)&CFindFolder::SearchThreadProc, &pParams->hModule);
+
+    // The worker thread gets its own reference.
+    // Keep the flags at 0: the worker exits through FreeLibraryAndExitThread, which skips the
+    // cleanup SHCreateThread runs after the thread procedure for CTF_THREAD_REF,
+    // CTF_PROCESS_REF and CTF_COINIT.
+    pSearchData->AddRef();
+    if (!SHCreateThread(SearchThreadProc, pParams, 0, NULL))
+    {
+        if (pParams->hModule)
+            FreeLibrary(pParams->hModule);
+        delete pParams;
+        pSearchData->Release();
+        pSearchData->Release();
+        return E_FAIL;
+    }
+
+    m_pSearchData = pSearchData;
+    NotifyConnections(DISPID_SEARCHSTART);
+    return S_OK;
 }
 
-LRESULT CFindFolder::StopSearch(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled)
+STDMETHODIMP CFindFolder::CancelSearch()
 {
-    if (m_hStopEvent)
-    {
-        SetEvent(m_hStopEvent);
-        m_hStopEvent = NULL;
-
-        // Wait for all in-flight messages with data we need to free
-        PostMessageW(WM_SEARCH_STOPPED, 0, 0);
-        for (MSG msg; PeekMessageW(&msg, m_hWnd, WM_SEARCH_START, WM_SEARCH_STOPPED, PM_REMOVE);)
-        {
-            if (msg.message == WM_SEARCH_STOPPED)
-                break;
-            if (msg.message == WM_SEARCH_ADD_RESULT || msg.message == WM_SEARCH_UPDATE_STATUS)
-                SHFree((void*)msg.lParam);
-        }
-    }
-    return 0;
+    EndSearch(TRUE);
+    return S_OK;
 }
 
-LRESULT CFindFolder::AddResult(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled)
+LRESULT CFindFolder::OnSearchUpdate(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled)
 {
-    if (!lParam)
+    // The message carries no data. Ignore it unless it belongs to the active search.
+    _SearchData *pSearchData = m_pSearchData;
+    if (!pSearchData || wParam != pSearchData->SearchId)
         return 0;
 
-    CComHeapPtr<WCHAR> lpPath((LPWSTR) lParam);
-    if (wParam != m_SearchId)
-        return 0;
+    // Keep the session alive while calling out; a sink may end the search meanwhile
+    pSearchData->AddRef();
+    InterlockedExchange(&pSearchData->fWakePending, FALSE);
 
-    CComHeapPtr<ITEMIDLIST> lpSearchPidl(_ILCreate(lpPath));
-    if (lpSearchPidl)
+    CSimpleArray<LPWSTR> Results;
+    EnterCriticalSection(&pSearchData->Lock);
+    for (int i = 0; i < pSearchData->Results.GetSize(); ++i)
     {
-        UINT uItemIndex;
-        m_shellFolderView->AddObject(lpSearchPidl, &uItemIndex);
+        if (!Results.Add(pSearchData->Results[i]))
+            SHFree(pSearchData->Results[i]);
+    }
+    pSearchData->Results.RemoveAll();
+    LPWSTR pszStatus = pSearchData->pszStatus;
+    pSearchData->pszStatus = NULL;
+    BOOL bDone = pSearchData->bDone;
+    UINT uTotalFound = pSearchData->uTotalFound;
+    LeaveCriticalSection(&pSearchData->Lock);
+
+    for (int i = 0; i < Results.GetSize(); ++i)
+    {
+        CComHeapPtr<ITEMIDLIST> lpSearchPidl(_ILCreate(Results[i]));
+        if (lpSearchPidl && m_shellFolderView && m_pSearchData == pSearchData)
+        {
+            UINT uItemIndex;
+            m_shellFolderView->AddObject(lpSearchPidl, &uItemIndex);
+        }
+        SHFree(Results[i]);
     }
 
-    return 0;
-}
+    if (m_pSearchData == pSearchData)
+    {
+        if (bDone)
+        {
+            // Retire the session before calling out, so that a search started
+            // from a callback is not mistaken for this one
+            m_pSearchData = NULL;
+            pSearchData->Release();
 
-LRESULT CFindFolder::UpdateStatus(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled)
-{
-    CComHeapPtr<WCHAR> status((LPWSTR) lParam);
-    if (m_shellBrowser && wParam == m_SearchId)
-        m_shellBrowser->SetStatusTextSB(status);
+            CStringW status;
+            status.Format(IDS_SEARCH_FILES_FOUND, uTotalFound);
+            if (m_shellBrowser)
+                m_shellBrowser->SetStatusTextSB(status);
+
+            NotifyConnections(DISPID_SEARCHCOMPLETE);
+        }
+        else if (pszStatus && m_shellBrowser)
+        {
+            m_shellBrowser->SetStatusTextSB(pszStatus);
+        }
+    }
+
+    SHFree(pszStatus);
+    pSearchData->Release();
     return 0;
 }
 
@@ -1260,7 +1476,7 @@ STDMETHODIMP CFindFolder::MessageSFVCB(UINT uMsg, WPARAM wParam, LPARAM lParam)
         }
         case SFVM_WINDOWCLOSING:
         {
-            SendMessage(WM_SEARCH_STOP, 0, 0);
+            EndSearch(TRUE);
 
             // [CORE-20504] LVN_ITEMACTIVATE in the DefView ListView can trigger a navigation that destroys this IShellFolder,
             // unsubclass now so we don't get a message after our "this" is dead.

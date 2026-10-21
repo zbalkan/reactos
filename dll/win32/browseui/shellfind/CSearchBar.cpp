@@ -313,7 +313,9 @@ LRESULT CSearchBar::OnSearchButtonClicked(WORD wNotifyCode, WORD wID, HWND hWndC
     WCHAR endchar;
     WCHAR startchar;
 
-    CComHeapPtr<SearchStart> pSearchStart(static_cast<SearchStart *>(CoTaskMemAlloc(sizeof(SearchStart))));
+    // The results folder copies the request, so it can live on the stack
+    SearchStart SearchParams = {};
+    SearchStart *pSearchStart = &SearchParams;
     GetDlgItemText(IDC_SEARCH_FILENAME, pSearchStart->szFileName, _countof(pSearchStart->szFileName));
     GetDlgItemText(IDC_SEARCH_QUERY, pSearchStart->szQuery, _countof(pSearchStart->szQuery));
 
@@ -358,8 +360,7 @@ LRESULT CSearchBar::OnSearchButtonClicked(WORD wNotifyCode, WORD wID, HWND hWndC
     if (FAILED_UNEXPECTEDLY(hr))
         return 0;
 
-    HWND hwnd;
-    if (FAILED(GetSearchResultsFolder(&pShellBrowser, &hwnd, NULL)))
+    if (FAILED(GetSearchResultsFolder(&pShellBrowser, NULL, NULL)))
     {
         // Open a new search results folder
         WCHAR szShellGuid[MAX_PATH];
@@ -379,13 +380,20 @@ LRESULT CSearchBar::OnSearchButtonClicked(WORD wNotifyCode, WORD wID, HWND hWndC
         if (FAILED_UNEXPECTEDLY(hr))
             return 0;
 
-        hr = GetSearchResultsFolder(&pShellBrowser, &hwnd, NULL);
+        hr = GetSearchResultsFolder(&pShellBrowser, NULL, NULL);
         if (FAILED_UNEXPECTEDLY(hr))
             return 0;
     }
 
-    FreeLocationsHelper.Detach();
-    ::PostMessageW(hwnd, WM_SEARCH_START, 0, (LPARAM) pSearchStart.Detach());
+    CComPtr<IROSFindFolderControl> pControl;
+    hr = GetSearchFolderControl(&pControl);
+    if (FAILED_UNEXPECTEDLY(hr))
+        return 0;
+
+    // Only show the search as running once the results folder has accepted it
+    hr = pControl->BeginSearch(pSearchStart);
+    if (FAILED_UNEXPECTEDLY(hr))
+        return 0;
 
     SetSearchInProgress(TRUE);
 
@@ -394,10 +402,9 @@ LRESULT CSearchBar::OnSearchButtonClicked(WORD wNotifyCode, WORD wID, HWND hWndC
 
 LRESULT CSearchBar::OnStopButtonClicked(WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL& bHandled)
 {
-    HWND hwnd;
-    HRESULT hr = GetSearchResultsFolder(NULL, &hwnd, NULL);
-    if (SUCCEEDED(hr))
-        ::PostMessageW(hwnd, WM_SEARCH_STOP, 0, 0);
+    CComPtr<IROSFindFolderControl> pControl;
+    if (SUCCEEDED(GetSearchFolderControl(&pControl)))
+        pControl->CancelSearch();
 
     return 0;
 }
@@ -754,6 +761,16 @@ void CSearchBar::SetSearchInProgress(BOOL bInProgress)
     HWND hProgressBar = GetDlgItem(IDC_PROGRESS_BAR);
     ::ShowWindow(hProgressBar, bInProgress ? SW_SHOW : SW_HIDE);
     ::PostMessage(hProgressBar, PBM_SETMARQUEE, bInProgress, 0);
+}
+
+HRESULT CSearchBar::GetSearchFolderControl(IROSFindFolderControl **ppControl)
+{
+    *ppControl = NULL;
+    CComPtr<IShellFolder> pShellFolder;
+    HRESULT hr = GetSearchResultsFolder(NULL, NULL, &pShellFolder);
+    if (FAILED(hr))
+        return hr;
+    return pShellFolder->QueryInterface(IID_IROSFindFolderControl, (void **)ppControl);
 }
 
 HRESULT CSearchBar::TrySubscribeToSearchEvents()

@@ -26,12 +26,6 @@
 
 #include "../resource.h"
 
-#define WM_SEARCH_START         (WM_USER + 0) // Must be ordered before any message with a payload
-#define WM_SEARCH_STOP          (WM_USER + 1)
-#define WM_SEARCH_ADD_RESULT    (WM_USER + 2)
-#define WM_SEARCH_UPDATE_STATUS (WM_USER + 3)
-#define WM_SEARCH_STOPPED       (WM_USER + 9) // Must be ordered after any message with a payload
-
 typedef struct tagLOCATIONITEM
 {
     struct tagLOCATIONITEM *pNext;
@@ -54,6 +48,24 @@ struct SearchStart
     WCHAR szFileName[MAX_PATH];
     WCHAR szQuery[MAX_PATH];
     BOOL  SearchHidden;
+};
+
+/*
+ * ReactOS-private interface the search band uses to control the search results folder.
+ * In-process only: it is never marshaled and is not a Windows interface. It replaces
+ * window messages that carried raw pointers to the results window, which any process
+ * on the desktop could post.
+ */
+// {31375A94-9FBB-40EA-AE48-323993D7B326}
+static const IID IID_IROSFindFolderControl =
+    { 0x31375a94, 0x9fbb, 0x40ea, { 0xae, 0x48, 0x32, 0x39, 0x93, 0xd7, 0xb3, 0x26 } };
+
+struct IROSFindFolderControl : public IUnknown
+{
+    // Starts a new search, replacing any running one. The callee copies pRequest.
+    STDMETHOD(BeginSearch)(_In_ const SearchStart *pRequest) PURE;
+    // Cancels the running search, if any
+    STDMETHOD(CancelSearch)() PURE;
 };
 
 template<class T, class F, class R>

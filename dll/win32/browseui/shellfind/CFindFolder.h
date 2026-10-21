@@ -9,6 +9,8 @@
 
 #include "shellfind.h"
 
+struct _SearchData;
+
 class CFindFolder :
         public CWindowImpl<CFindFolder>,
         public CComCoClass<CFindFolder, &CLSID_FindFolder>,
@@ -17,6 +19,7 @@ class CFindFolder :
         public IPersistFolder2,
         public IShellFolderViewCB,
         public IItemNameLimits,
+        public IROSFindFolderControl,
         public IConnectionPointContainerImpl<CFindFolder>,
         public IConnectionPointImpl<CFindFolder, &DIID_DSearchCommandEvents>
 {
@@ -67,12 +70,16 @@ class CFindFolder :
     STDMETHOD(GetMaxLength)(LPCWSTR pszName, int *piMaxNameLen) override;
     STDMETHOD(GetValidCharacters)(LPWSTR *ppwszValidChars, LPWSTR *ppwszInvalidChars) override;
 
+    //// *** IROSFindFolderControl methods ***
+    STDMETHOD(BeginSearch)(const SearchStart *pRequest) override;
+    STDMETHOD(CancelSearch)() override;
+
 private:
     LPITEMIDLIST m_pidl;
     CComPtr<IShellFolder2> m_pisfInner, m_pSfDesktop;
     CComPtr<IShellFolderView> m_shellFolderView;
     CComPtr<IShellBrowser> m_shellBrowser;
-    HANDLE m_hStopEvent;
+    _SearchData *m_pSearchData; // Active search, owned by this folder
     UINT m_SearchId = 0;
 
     HRESULT GetFSFolderAndChild(LPCITEMIDLIST pidl, IShellFolder **ppSF, PCUITEMID_CHILD *ppidlLast = NULL);
@@ -81,6 +88,8 @@ private:
     HDPA CreateAbsolutePidlArray(UINT cidl, PCUITEMID_CHILD_ARRAY apidl);
     static int CALLBACK SortItemsForDataObject(void *p1, void *p2, LPARAM lparam);
     void NotifyConnections(DISPID id);
+    void EndSearch(BOOL bNotify);
+    static UINT GetSearchUpdateMessage();
     static DWORD WINAPI SearchThreadProc(LPVOID lpParameter);
 
     //// *** IPersistFolder2 methods ***
@@ -95,13 +104,8 @@ private:
     STDMETHODIMP GetClassID(CLSID *pClassId);
 
     // *** Message handlers ***
-    LRESULT StartSearch(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
+    LRESULT OnSearchUpdate(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
 
-    LRESULT StopSearch(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
-
-    LRESULT AddResult(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
-
-    LRESULT UpdateStatus(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
 
 public:
     CFindFolder();
@@ -118,10 +122,7 @@ public:
     END_CONNECTION_POINT_MAP()
 
     BEGIN_MSG_MAP(CFindFolder)
-        MESSAGE_HANDLER(WM_SEARCH_START, StartSearch)
-        MESSAGE_HANDLER(WM_SEARCH_STOP, StopSearch)
-        MESSAGE_HANDLER(WM_SEARCH_ADD_RESULT, AddResult)
-        MESSAGE_HANDLER(WM_SEARCH_UPDATE_STATUS, UpdateStatus)
+        MESSAGE_HANDLER(GetSearchUpdateMessage(), OnSearchUpdate)
     END_MSG_MAP()
 
     BEGIN_COM_MAP(CFindFolder)
@@ -129,6 +130,7 @@ public:
         COM_INTERFACE_ENTRY_IID(IID_IShellFolder, IShellFolder)
         COM_INTERFACE_ENTRY_IID(IID_IShellFolderViewCB, IShellFolderViewCB)
         COM_INTERFACE_ENTRY_IID(IID_IItemNameLimits, IItemNameLimits)
+        COM_INTERFACE_ENTRY_IID(IID_IROSFindFolderControl, IROSFindFolderControl)
         COM_INTERFACE_ENTRY_IID(IID_IPersistFolder2, IPersistFolder2)
         COM_INTERFACE_ENTRY_IID(IID_IPersistFolder, IPersistFolder)
         COM_INTERFACE_ENTRY_IID(IID_IPersist, IPersist)
