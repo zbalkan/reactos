@@ -105,6 +105,7 @@ private:
 
 public:
     CFindFolder();
+    ~CFindFolder();
 
     DECLARE_REGISTRY_RESOURCEID(IDR_FINDFOLDER)
 

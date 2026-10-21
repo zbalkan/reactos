@@ -147,6 +147,11 @@ CFindFolder::CFindFolder() :
 {
 }
 
+CFindFolder::~CFindFolder()
+{
+    ILFree(m_pidl);
+}
+
 static LPITEMIDLIST _ILCreate(LPCWSTR lpszPath)
 {
     CComHeapPtr<ITEMIDLIST> lpFSPidl(ILCreateFromPathW(lpszPath));
@@ -204,9 +209,9 @@ static LPCITEMIDLIST _ILGetFSPidl(LPCITEMIDLIST pidl)
 static PIDLIST_ABSOLUTE _ILCreateAbsolute(LPCITEMIDLIST pidlChild)
 {
     PIDLIST_ABSOLUTE pidl = NULL;
-    if (PIDLIST_ABSOLUTE pidlFolder = SHSimpleIDListFromPath(_ILGetPath(pidl))) // FIXME: SHELL32_CreateSimpleIDListFromPath(, DIRECTORY)
+    if (PIDLIST_ABSOLUTE pidlFolder = SHSimpleIDListFromPath(_ILGetPath(pidlChild))) // FIXME: SHELL32_CreateSimpleIDListFromPath(, DIRECTORY)
     {
-        pidl = ILCombine(pidlFolder, _ILGetFSPidl(pidl));
+        pidl = ILCombine(pidlFolder, _ILGetFSPidl(pidlChild));
         ILFree(pidlFolder);
     }
     return pidl;
@@ -293,12 +298,14 @@ struct _SearchData
 template<typename TChar, typename TString, int (&StrNCmp)(const TChar *, const TChar *, size_t)>
 static const TChar* StrStrN(const TChar *lpFirst, const TString &lpSrch, UINT cchMax)
 {
-    if (!lpFirst || lpSrch.IsEmpty() || !cchMax)
+    UINT cchSrch = lpSrch.GetLength();
+    if (!lpFirst || !cchSrch || cchMax < cchSrch)
         return NULL;
 
-    for (UINT i = cchMax; i > 0 && *lpFirst; i--, lpFirst++)
+    // Only compare where the whole search string fits in the remaining buffer
+    for (UINT i = cchMax - cchSrch + 1; i > 0 && *lpFirst; i--, lpFirst++)
     {
-        if (!StrNCmp(lpFirst, lpSrch, lpSrch.GetLength()))
+        if (!StrNCmp(lpFirst, lpSrch, cchSrch))
             return (const TChar*)lpFirst;
     }
 
@@ -450,21 +457,24 @@ IsDataUnicode(
 
 static BOOL SearchFile(LPCWSTR lpFilePath, _SearchData *pSearchData)
 {
-    HANDLE hFile = CreateFileW(lpFilePath, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_READONLY, NULL);
+    HANDLE hFile = CreateFileW(lpFilePath, GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_READONLY, NULL);
     if (hFile == INVALID_HANDLE_VALUE)
         return FALSE;
 
-    // FIXME: support large file
-    DWORD size = GetFileSize(hFile, NULL);
-    if (size == 0 || size == INVALID_FILE_SIZE)
+    // FIXME: Search files of 4 GiB and larger in chunks instead of skipping them
+    LARGE_INTEGER FileSize;
+    if (!GetFileSizeEx(hFile, &FileSize) || FileSize.QuadPart == 0 || FileSize.HighPart != 0)
     {
         CloseHandle(hFile);
         return FALSE;
     }
+    DWORD size = FileSize.LowPart;
 
     HANDLE hFileMap = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, size, NULL);
     CloseHandle(hFile);
-    if (hFileMap == INVALID_HANDLE_VALUE)
+    if (!hFileMap)
         return FALSE;
 
     LPBYTE pbContents = (LPBYTE)MapViewOfFile(hFileMap, FILE_MAP_READ, 0, 0, size);
@@ -550,7 +560,8 @@ static UINT RecursiveFind(LPCWSTR lpPath, _SearchData *pSearchData)
     BOOL bMoreFiles = TRUE;
     UINT uTotalFound = 0;
 
-    PathCombineW(szPath, lpPath, L"*");
+    if (!PathCombineW(szPath, lpPath, L"*"))
+        return 0;
 
     for (hFindFile = FindFirstFileW(szPath, &FindData);
         bMoreFiles && hFindFile != INVALID_HANDLE_VALUE;
@@ -560,7 +571,9 @@ static UINT RecursiveFind(LPCWSTR lpPath, _SearchData *pSearchData)
         if (IS_DOTS(FindData.cFileName))
             continue;
 
-        PathCombineW(szPath, lpPath, FindData.cFileName);
+        // Skip entries whose full path does not fit
+        if (!PathCombineW(szPath, lpPath, FindData.cFileName))
+            continue;
 
         if (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
         {
@@ -572,10 +585,15 @@ static UINT RecursiveFind(LPCWSTR lpPath, _SearchData *pSearchData)
                 PostUpdate(WM_SEARCH_ADD_RESULT, szPath, *pSearchData);
                 uTotalFound++;
             }
-            status.Format(IDS_SEARCH_FOLDER, FindData.cFileName);
-            PostUpdate(WM_SEARCH_UPDATE_STATUS, status.GetBuffer(), *pSearchData);
+            // Do not follow junctions and directory symbolic links: they can point to an
+            // ancestor and make the search loop forever
+            if (!(FindData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            {
+                status.Format(IDS_SEARCH_FOLDER, FindData.cFileName);
+                PostUpdate(WM_SEARCH_UPDATE_STATUS, status.GetBuffer(), *pSearchData);
 
-            uTotalFound += RecursiveFind(szPath, pSearchData);
+                uTotalFound += RecursiveFind(szPath, pSearchData);
+            }
         }
         else if (FileNameMatch(FindData.cFileName, pSearchData)
                 && AttribHiddenMatch(FindData.dwFileAttributes, pSearchData)
@@ -1085,15 +1103,19 @@ public:
 
 int CALLBACK CFindFolder::SortItemsForDataObject(void *p1, void *p2, LPARAM lparam)
 {
-    // For Delete/Move operations, a subfolder/file needs to come before the parent folder
-    return ::ILGetSize((LPCITEMIDLIST)p1) - ::ILGetSize((LPCITEMIDLIST)p2);
+    // For Delete/Move operations, a subfolder/file needs to come before the parent folder.
+    // A descendant's absolute pidl extends its ancestor's, so sort the longest pidls first.
+    return (int)::ILGetSize((LPCITEMIDLIST)p2) - (int)::ILGetSize((LPCITEMIDLIST)p1);
 }
 
 STDMETHODIMP CFindFolder::GetUIObjectOf(HWND hwndOwner, UINT cidl, PCUITEMID_CHILD_ARRAY apidl, REFIID riid,
                                         UINT *prgfInOut, LPVOID *ppvOut)
 {
     HRESULT hr;
-    if (cidl <= 0)
+    if (!ppvOut)
+        return E_POINTER;
+    *ppvOut = NULL;
+    if (cidl <= 0 || !apidl)
         return E_INVALIDARG;
 
     CComHeapPtr<PCITEMID_CHILD> aFSPidlAlloc;
@@ -1113,7 +1135,22 @@ STDMETHODIMP CFindFolder::GetUIObjectOf(HWND hwndOwner, UINT cidl, PCUITEMID_CHI
             }
         }
 
-        aFSPidlAlloc.Allocate(cidl);
+        // The remaining objects are created by the items' parent folder, which can only
+        // interpret its own children. Never hand items from other folders to it.
+        PCWSTR pszFirstParent = _ILGetPath(apidl[0]);
+        for (UINT i = 1; i < cidl; i++)
+        {
+            PCWSTR pszParent = _ILGetPath(apidl[i]);
+            if (!pszFirstParent || !pszParent || lstrcmpiW(pszFirstParent, pszParent))
+            {
+                // FIXME: Build an aggregate object for items from different folders
+                WARN("Selection spans more than one folder\n");
+                return E_FAIL;
+            }
+        }
+
+        if (!aFSPidlAlloc.Allocate(cidl))
+            return E_OUTOFMEMORY;
         aFSPidl = aFSPidlAlloc;
     }
     for (UINT i = 0; i < cidl; i++)
@@ -1271,6 +1308,13 @@ STDMETHODIMP CFindFolder::GetValidCharacters(LPWSTR *ppwszValidChars, LPWSTR *pp
 //// *** IPersistFolder2 methods ***
 STDMETHODIMP CFindFolder::GetCurFolder(PIDLIST_ABSOLUTE *pidl)
 {
+    if (!pidl)
+        return E_POINTER;
+    if (!m_pidl)
+    {
+        *pidl = NULL;
+        return S_FALSE;
+    }
     return SHILClone(m_pidl, pidl);
 }
 
