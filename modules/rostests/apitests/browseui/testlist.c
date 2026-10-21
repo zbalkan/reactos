@@ -3,6 +3,7 @@
 #include <apitest.h>
 
 extern void func_ACListISF(void);
+extern void func_CFindFolder(void);
 extern void func_IACLCustomMRU(void);
 extern void func_IACLHistory(void);
 extern void func_IAutoComplete(void);
@@ -12,6 +13,7 @@ extern void func_SHExplorerParseCmdLine(void);
 const struct test winetest_testlist[] =
 {
     { "ACListISF", func_ACListISF },
+    { "CFindFolder", func_CFindFolder },
     { "IACLCustomMRU", func_IACLCustomMRU },
     { "IACLHistory", func_IACLHistory },
     { "IAutoComplete", func_IAutoComplete },
