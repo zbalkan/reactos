@@ -4,6 +4,7 @@ spec2def(shell32_apitest.exe shell32_apitest.spec)
 list(APPEND SOURCE
     AddCommas.cpp
     AssocCreateElement.cpp
+    CFindFolder.cpp
     CFSFolder.cpp
     CheckEscapes.cpp
     CIDLData.cpp
