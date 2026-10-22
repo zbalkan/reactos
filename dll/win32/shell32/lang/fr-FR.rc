@@ -1084,11 +1084,11 @@ END
 /* Search results folder */
 STRINGTABLE
 BEGIN
-    IDS_SEARCH_RESULTS "Search Results"
-    IDS_SEARCH_FOLDER "Searching %s"
-    IDS_SEARCH_FILES_FOUND "%u files found"
-    IDS_SEARCH_OPEN_FOLDER "Open Containing &Folder"
-    IDS_COL_NAME "Name"
-    IDS_COL_LOCATION "In Folder"
-    IDS_COL_RELEVANCE "Relevance"
+    IDS_SEARCH_RESULTS "Résultats de la recherche"
+    IDS_SEARCH_FOLDER "Recherche de %s en cours"
+    IDS_SEARCH_FILES_FOUND "%u fichiers trouvés"
+    IDS_SEARCH_OPEN_FOLDER "Ouvrir le &dossier parent"
+    IDS_COL_NAME "Nom"
+    IDS_COL_LOCATION "Dans le dossier"
+    IDS_COL_RELEVANCE "Pertinence"
 END
