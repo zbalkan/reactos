@@ -1089,3 +1089,15 @@ BEGIN
     IDS_LOG_OFF_TITLE "Выход"
     IDS_SWITCH_USER_TITLE "Сменить пользователя"
 END
+
+/* Search results folder */
+STRINGTABLE
+BEGIN
+    IDS_SEARCH_RESULTS "Результаты поиска"
+    IDS_SEARCH_FOLDER "Ищем в ""%s"""
+    IDS_SEARCH_FILES_FOUND "Найдено файлов: %u"
+    IDS_SEARCH_OPEN_FOLDER "Открыть &расположение объекта"
+    IDS_COL_NAME "Имя"
+    IDS_COL_LOCATION "В папке"
+    IDS_COL_RELEVANCE "Релевантность"
+END

@@ -88,6 +88,7 @@
 #include "CDropTargetHelper.h"
 #include "CFolderOptions.h"
 #include "folders/CFSFolder.h"
+#include "folders/CFindFolder.h"
 #include "folders/CDrivesFolder.h"
 #include "folders/CDesktopFolder.h"
 #include "folders/CControlPanelFolder.h"
@@ -217,6 +218,9 @@ UINT
 MapVerbToDfmCmd(_In_ LPCSTR verba);
 UINT
 GetDfmCmd(_In_ IContextMenu *pCM, _In_ LPCSTR verba);
+HRESULT
+GetCommandStringA(_In_ IContextMenu *pCM, _In_ UINT_PTR Id, _In_ UINT GCS,
+                  _Out_writes_(cchMax) LPSTR Buf, _In_ UINT cchMax);
 
 EXTERN_C BOOL WINAPI
 SHELL32_RunControlPanel(_In_ PCWSTR commandLine, _In_opt_ HWND parent);

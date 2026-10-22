@@ -5,7 +5,6 @@ add_definitions(-DUNICODE -D_UNICODE)
 
 list(APPEND SOURCE
     CSearchBar.cpp
-    CFindFolder.cpp
     shellfind.h)
 
 add_library(shellfind OBJECT ${SOURCE})

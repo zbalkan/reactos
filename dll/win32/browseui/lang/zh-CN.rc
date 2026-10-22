@@ -346,14 +346,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_SEARCH_RESULTS "搜索结果"
     IDS_SEARCHINVALID "“%1”不是一个合法的目录。"
-    IDS_SEARCH_FOLDER "正在搜索 %s"
-    IDS_SEARCH_FILES_FOUND "找到了 %u 个文件"
-    IDS_SEARCH_OPEN_FOLDER "打开所在文件夹(&F)"
-    IDS_COL_NAME "文件名"
-    IDS_COL_LOCATION "所在文件夹"
-    IDS_COL_RELEVANCE "相关度"
 END
 
 STRINGTABLE

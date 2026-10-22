@@ -92,16 +92,6 @@ static HRESULT GetClassOfItem(PCIDLIST_ABSOLUTE pidl, CLSID *pCLSID)
     return SUCCEEDED(hr) ? IUnknown_GetClassID(psf, pCLSID) : hr;
 }
 
-void FreeList(LOCATIONITEM *pItems)
-{
-    while (pItems)
-    {
-        LOCATIONITEM *pNext = pItems->pNext;
-        CoTaskMemFree(pItems);
-        pItems = pNext;
-    }
-}
-
 static LOCATIONITEM* CreateLocationListItem(PCWSTR szPath)
 {
     const SIZE_T cch = lstrlenW(szPath) + 1;

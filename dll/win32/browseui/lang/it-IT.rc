@@ -324,14 +324,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_SEARCH_RESULTS "Risultati ricerca"
     IDS_SEARCHINVALID "'%1' non è una cartella valida."
-    IDS_SEARCH_FOLDER "Sto cercando %s"
-    IDS_SEARCH_FILES_FOUND "trovati %u file"
-    IDS_SEARCH_OPEN_FOLDER "Open Containing &Folder"
-    IDS_COL_NAME "Nome"
-    IDS_COL_LOCATION "In Folder"
-    IDS_COL_RELEVANCE "Rivelanza"
 END
 
 STRINGTABLE

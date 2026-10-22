@@ -24,21 +24,9 @@
 #include <strsafe.h>
 #include <wine/debug.h>
 
+#include <shellfind_undoc.h>
+
 #include "../resource.h"
-
-#define WM_SEARCH_START         (WM_USER + 0) // Must be ordered before any message with a payload
-#define WM_SEARCH_STOP          (WM_USER + 1)
-#define WM_SEARCH_ADD_RESULT    (WM_USER + 2)
-#define WM_SEARCH_UPDATE_STATUS (WM_USER + 3)
-#define WM_SEARCH_STOPPED       (WM_USER + 9) // Must be ordered after any message with a payload
-
-typedef struct tagLOCATIONITEM
-{
-    struct tagLOCATIONITEM *pNext;
-    WCHAR szPath[ANYSIZE_ARRAY];
-} LOCATIONITEM;
-
-void FreeList(LOCATIONITEM *pLI);
 
 struct ScopedFreeLocationItems
 {
@@ -46,14 +34,6 @@ struct ScopedFreeLocationItems
     ScopedFreeLocationItems(LOCATIONITEM *ptr) : m_ptr(ptr) {}
     ~ScopedFreeLocationItems() { FreeList(m_ptr); }
     void Detach() { m_ptr = NULL; }
-};
-
-struct SearchStart
-{
-    LOCATIONITEM *pPaths;
-    WCHAR szFileName[MAX_PATH];
-    WCHAR szQuery[MAX_PATH];
-    BOOL  SearchHidden;
 };
 
 template<class T, class F, class R>

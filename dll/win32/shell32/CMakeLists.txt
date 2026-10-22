@@ -51,6 +51,7 @@ list(APPEND SOURCE
     CFolderOptions.cpp
     folders/CDesktopFolder.cpp
     folders/CFSFolder.cpp
+    folders/CFindFolder.cpp
     folders/CDrivesFolder.cpp
     folders/CMyDocsFolder.cpp
     folders/CPrinterFolder.cpp

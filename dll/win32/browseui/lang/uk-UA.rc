@@ -333,14 +333,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_SEARCH_RESULTS "Результати пошуку"
     IDS_SEARCHINVALID "'%1' не є дійсною папкою."
-    IDS_SEARCH_FOLDER "Пошук у %s"
-    IDS_SEARCH_FILES_FOUND "Знайдено файлів: %u"
-    IDS_SEARCH_OPEN_FOLDER "Відкрити папку, що &містить"
-    IDS_COL_NAME "Ім'я"
-    IDS_COL_LOCATION "У папці"
-    IDS_COL_RELEVANCE "Релевантність"
 END
 
 STRINGTABLE

@@ -288,6 +288,14 @@
 #define IDS_SEARCH_LOCALDRIVES     10241
 #define IDS_SEARCH_BROWSEITEM      10244
 
+/* Search results folder */
+#define IDS_COL_NAME               8976
+#define IDS_COL_LOCATION           8977
+#define IDS_COL_RELEVANCE          8989
+#define IDS_SEARCH_FILES_FOUND     9232
+#define IDS_SEARCH_FOLDER          9234
+#define IDS_SEARCH_OPEN_FOLDER     40960
+
 /* Recycle Bin Cleaner */
 #define IDS_RECYCLE_CLEANER_DISPLAYNAME             10291
 #define IDS_RECYCLE_CLEANER_DESCRIPTION             10292
@@ -344,7 +352,7 @@
 #define IDS_STARTPANELCFG_PRINTERS                  30493
 #define IDS_STARTPANELCFG_ADMINTOOLS                30515
 
-#define IDS_SEARCH_RESULTS                          30520 // FIXME: Move browseui IDS_SEARCH_RESULTS to shell32
+#define IDS_SEARCH_RESULTS                          30520
 #define IDS_SEARCH_RESULTS_COMPUTERS                30521
 
 #define IDS_NEWEXT_SPECIFY_EXT                      10086
@@ -961,3 +969,4 @@
 #define IDR_SYSTEMFILEASSOC     164
 #define IDR_SHELLLIBRARY        165
 #define IDR_USEREVENTTIMER      166
+#define IDR_FINDFOLDER          167

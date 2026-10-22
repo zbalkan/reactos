@@ -342,14 +342,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_SEARCH_RESULTS "検索結果"
     IDS_SEARCHINVALID "'%1' は有効なフォルダではありません。"
-    IDS_SEARCH_FOLDER "%s を検索中"
-    IDS_SEARCH_FILES_FOUND "%u 個のファイルが見つかりました"
-    IDS_SEARCH_OPEN_FOLDER "この場所のフォルダを開く(&F)"
-    IDS_COL_NAME "名前"
-    IDS_COL_LOCATION "場所"
-    IDS_COL_RELEVANCE "関連"
 END
 
 STRINGTABLE

@@ -1081,3 +1081,15 @@ BEGIN
     IDS_LOG_OFF_TITLE "Abmelden"
     IDS_SWITCH_USER_TITLE "Benutzer wechseln"
 END
+
+/* Search results folder */
+STRINGTABLE
+BEGIN
+    IDS_SEARCH_RESULTS "Suchergebnisse"
+    IDS_SEARCH_FOLDER "%s wird durchsucht"
+    IDS_SEARCH_FILES_FOUND "%u Objekte gefunden"
+    IDS_SEARCH_OPEN_FOLDER "Übergeordneten Ordner ö&ffnen"
+    IDS_COL_NAME "Name"
+    IDS_COL_LOCATION "In Ordner"
+    IDS_COL_RELEVANCE "Relevanz"
+END

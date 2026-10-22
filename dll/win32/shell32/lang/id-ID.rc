@@ -1076,3 +1076,15 @@ BEGIN
     IDS_LOG_OFF_TITLE "Keluar"
     IDS_SWITCH_USER_TITLE "Ganti Pengguna"
 END
+
+/* Search results folder */
+STRINGTABLE
+BEGIN
+    IDS_SEARCH_RESULTS "Hasil Pencarian"
+    IDS_SEARCH_FOLDER "Mencari %s"
+    IDS_SEARCH_FILES_FOUND "%u berkas ditemukan"
+    IDS_SEARCH_OPEN_FOLDER "Buka &Folder Terkait"
+    IDS_COL_NAME "Nama"
+    IDS_COL_LOCATION "Dalam Folder"
+    IDS_COL_RELEVANCE "Relevansi"
+END

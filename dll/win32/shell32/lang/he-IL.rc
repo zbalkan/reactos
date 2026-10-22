@@ -1088,3 +1088,15 @@ BEGIN
     IDS_LOG_OFF_TITLE "התנתק"
     IDS_SWITCH_USER_TITLE "Switch User"
 END
+
+/* Search results folder */
+STRINGTABLE
+BEGIN
+    IDS_SEARCH_RESULTS "Search Results"
+    IDS_SEARCH_FOLDER "מחפש ב %s"
+    IDS_SEARCH_FILES_FOUND "%u קבצים נמצאו"
+    IDS_SEARCH_OPEN_FOLDER "&פתח תיקיה מכילה"
+    IDS_COL_NAME "שם"
+    IDS_COL_LOCATION "בתיקיה"
+    IDS_COL_RELEVANCE "רלוונטיות"
+END

@@ -334,14 +334,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_SEARCH_RESULTS "Arama sonuçları"
     IDS_SEARCHINVALID "'%1' geçerli bir dizin değil."
-    IDS_SEARCH_FOLDER "%s aranıyor."
-    IDS_SEARCH_FILES_FOUND "%u dosya bulundu"
-    IDS_SEARCH_OPEN_FOLDER "Bulunduğu &Dizini Aç"
-    IDS_COL_NAME "İsim"
-    IDS_COL_LOCATION "Şurada"
-    IDS_COL_RELEVANCE "Uygunluk"
 END
 
 STRINGTABLE

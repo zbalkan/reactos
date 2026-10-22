@@ -157,7 +157,6 @@ OBJECT_ENTRY(CLSID_TaskbarList, CTaskbarList)
 OBJECT_ENTRY(CLSID_FileSearchBand, CSearchBar)
 OBJECT_ENTRY(CLSID_ProgressDialog, CProgressDialog)
 OBJECT_ENTRY(CLSID_ISFBand, CISFBand)
-OBJECT_ENTRY(CLSID_FindFolder, CFindFolder)
 OBJECT_ENTRY(CLSID_UserAssist, CUserAssist)
 END_OBJECT_MAP()
 

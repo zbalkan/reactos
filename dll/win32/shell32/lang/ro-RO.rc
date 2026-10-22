@@ -1088,3 +1088,15 @@ BEGIN
     IDS_LOG_OFF_TITLE "&Log Off"
     IDS_SWITCH_USER_TITLE "Comutare utilizatori"
 END
+
+/* Search results folder */
+STRINGTABLE
+BEGIN
+    IDS_SEARCH_RESULTS "Rezultatele căutării"
+    IDS_SEARCH_FOLDER "Căutare %s"
+    IDS_SEARCH_FILES_FOUND "%u fișiere găsite"
+    IDS_SEARCH_OPEN_FOLDER "Deschide folderul &conținător"
+    IDS_COL_NAME "Nume"
+    IDS_COL_LOCATION "În folder"
+    IDS_COL_RELEVANCE "Relevanță"
+END

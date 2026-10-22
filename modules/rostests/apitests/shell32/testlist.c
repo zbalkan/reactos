@@ -7,6 +7,7 @@ extern void func_AssocCreateElement(void);
 extern void func_Control_RunDLLW(void);
 extern void func_CFSFolder(void);
 extern void func_CheckEscapes(void);
+extern void func_CFindFolder(void);
 extern void func_CIDLData(void);
 extern void func_CMyComputer(void);
 extern void func_CommandLineToArgvW(void);
@@ -75,6 +76,7 @@ const struct test winetest_testlist[] =
     { "Control_RunDLLW", func_Control_RunDLLW },
     { "CFSFolder", func_CFSFolder },
     { "CheckEscapes", func_CheckEscapes },
+    { "CFindFolder", func_CFindFolder },
     { "CIDLData", func_CIDLData },
     { "CMyComputer", func_CMyComputer },
     { "CommandLineToArgvW", func_CommandLineToArgvW },

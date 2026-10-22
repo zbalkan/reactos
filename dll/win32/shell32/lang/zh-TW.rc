@@ -1090,3 +1090,15 @@ BEGIN
     IDS_LOG_OFF_TITLE "登出"
     IDS_SWITCH_USER_TITLE "切換使用者"
 END
+
+/* Search results folder */
+STRINGTABLE
+BEGIN
+    IDS_SEARCH_RESULTS "搜尋結果"
+    IDS_SEARCH_FOLDER "正在搜尋 %s"
+    IDS_SEARCH_FILES_FOUND "找到 %u 個檔案"
+    IDS_SEARCH_OPEN_FOLDER "開啟所屬資料夾(&F)"
+    IDS_COL_NAME "名稱"
+    IDS_COL_LOCATION "在資料夾"
+    IDS_COL_RELEVANCE "關聯"
+END

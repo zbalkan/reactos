@@ -1080,3 +1080,15 @@ BEGIN
     IDS_LOG_OFF_TITLE "Fermer"
     IDS_SWITCH_USER_TITLE "Changer d'utilisateur"
 END
+
+/* Search results folder */
+STRINGTABLE
+BEGIN
+    IDS_SEARCH_RESULTS "Résultats de la recherche"
+    IDS_SEARCH_FOLDER "Recherche de %s en cours"
+    IDS_SEARCH_FILES_FOUND "%u fichiers trouvés"
+    IDS_SEARCH_OPEN_FOLDER "Ouvrir le &dossier parent"
+    IDS_COL_NAME "Nom"
+    IDS_COL_LOCATION "Dans le dossier"
+    IDS_COL_RELEVANCE "Pertinence"
+END

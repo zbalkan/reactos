@@ -1090,3 +1090,15 @@ BEGIN
     IDS_LOG_OFF_TITLE "Oturumu Kapat"
     IDS_SWITCH_USER_TITLE "Kullanıcı Değiştir"
 END
+
+/* Search results folder */
+STRINGTABLE
+BEGIN
+    IDS_SEARCH_RESULTS "Arama sonuçları"
+    IDS_SEARCH_FOLDER "%s aranıyor."
+    IDS_SEARCH_FILES_FOUND "%u dosya bulundu"
+    IDS_SEARCH_OPEN_FOLDER "Bulunduğu &Dizini Aç"
+    IDS_COL_NAME "İsim"
+    IDS_COL_LOCATION "Şurada"
+    IDS_COL_RELEVANCE "Uygunluk"
+END

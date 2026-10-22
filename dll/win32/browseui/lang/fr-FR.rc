@@ -342,14 +342,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_SEARCH_RESULTS "Résultats de la recherche"
     IDS_SEARCHINVALID "'%1' n'est pas un dossier valide."
-    IDS_SEARCH_FOLDER "Recherche de %s en cours"
-    IDS_SEARCH_FILES_FOUND "%u fichiers trouvés"
-    IDS_SEARCH_OPEN_FOLDER "Ouvrir le &dossier parent"
-    IDS_COL_NAME "Nom"
-    IDS_COL_LOCATION "Dans le dossier"
-    IDS_COL_RELEVANCE "Pertinence"
 END
 
 STRINGTABLE
