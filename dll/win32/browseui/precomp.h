@@ -49,7 +49,6 @@
 #include "shellbars/CBandSite.h"
 #include "shellbars/CBandSiteMenu.h"
 #include "shellbars/CISFBand.h"
-#include "shellfind/CFindFolder.h"
 #include "shellfind/CSearchBar.h"
 #include "brandband.h"
 #include "internettoolbar.h"

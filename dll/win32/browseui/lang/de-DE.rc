@@ -332,14 +332,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_SEARCH_RESULTS "Suchergebnisse"
     IDS_SEARCHINVALID "'%1' ist kein gültiger Ordner."
-    IDS_SEARCH_FOLDER "%s wird durchsucht"
-    IDS_SEARCH_FILES_FOUND "%u Objekte gefunden"
-    IDS_SEARCH_OPEN_FOLDER "Übergeordneten Ordner ö&ffnen"
-    IDS_COL_NAME "Name"
-    IDS_COL_LOCATION "In Ordner"
-    IDS_COL_RELEVANCE "Relevanz"
 END
 
 STRINGTABLE

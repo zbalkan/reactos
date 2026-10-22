@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include "shellfind.h"
+#include <shellfind_undoc.h>
 
 class CFindFolder :
         public CWindowImpl<CFindFolder>,

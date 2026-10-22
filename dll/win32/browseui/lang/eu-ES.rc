@@ -331,14 +331,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_SEARCH_RESULTS "Search Results"
     IDS_SEARCHINVALID "'%1' no es una carpeta válida."
-    IDS_SEARCH_FOLDER "Buscando %s"
-    IDS_SEARCH_FILES_FOUND "%u archivos encontrados"
-    IDS_SEARCH_OPEN_FOLDER "Abrir ubicación de &archivo"
-    IDS_COL_NAME "Nombre"
-    IDS_COL_LOCATION "En la carpeta"
-    IDS_COL_RELEVANCE "Relevancia"
 END
 
 STRINGTABLE

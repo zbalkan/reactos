@@ -342,14 +342,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_SEARCH_RESULTS "Keresési eredmények"
     IDS_SEARCHINVALID "A(z) '%1' érvénytelen mappa."
-    IDS_SEARCH_FOLDER "Keresés %s"
-    IDS_SEARCH_FILES_FOUND "%u fájl található"
-    IDS_SEARCH_OPEN_FOLDER "Tartalmazó &mappa megnyitása"
-    IDS_COL_NAME "Név"
-    IDS_COL_LOCATION "Mappa"
-    IDS_COL_RELEVANCE "Relevancia"
 END
 
 STRINGTABLE

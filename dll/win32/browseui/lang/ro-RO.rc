@@ -332,14 +332,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_SEARCH_RESULTS "Rezultatele căutării"
     IDS_SEARCHINVALID "'%1' nu este un folder valid."
-    IDS_SEARCH_FOLDER "Căutare %s"
-    IDS_SEARCH_FILES_FOUND "%u fișiere găsite"
-    IDS_SEARCH_OPEN_FOLDER "Deschide folderul &conținător"
-    IDS_COL_NAME "Nume"
-    IDS_COL_LOCATION "În folder"
-    IDS_COL_RELEVANCE "Relevanță"
 END
 
 STRINGTABLE

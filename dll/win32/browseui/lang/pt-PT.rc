@@ -332,14 +332,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_SEARCH_RESULTS "Resultados da procura"
     IDS_SEARCHINVALID "'%1' não é uma pasta válida."
-    IDS_SEARCH_FOLDER "A procurar %s"
-    IDS_SEARCH_FILES_FOUND "%u ficheiros encontrados"
-    IDS_SEARCH_OPEN_FOLDER "Abrir &pasta de destino"
-    IDS_COL_NAME "Nome"
-    IDS_COL_LOCATION "na pasta"
-    IDS_COL_RELEVANCE "Relevância"
 END
 
 STRINGTABLE

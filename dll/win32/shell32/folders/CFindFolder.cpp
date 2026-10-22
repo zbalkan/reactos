@@ -5,104 +5,14 @@
  * COPYRIGHT:   Copyright 2019 Brock Mammen
  */
 
-#include "CFindFolder.h"
+#include <precomp.h>
 #include <exdispid.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(shellfind);
 
-#ifndef _SHELL32_
-
-static HRESULT WINAPI DisplayNameOfW(_In_ IShellFolder *psf, _In_ LPCITEMIDLIST pidl,
-                                     _In_ DWORD dwFlags, _Out_ LPWSTR pszBuf, _In_ UINT cchBuf)
-{
-    *pszBuf = UNICODE_NULL;
-    STRRET sr;
-    HRESULT hr = psf->GetDisplayNameOf(pidl, dwFlags, &sr);
-    return FAILED(hr) ? hr : StrRetToBufW(&sr, pidl, pszBuf, cchBuf);
-}
-
-static HRESULT
-GetCommandStringA(_In_ IContextMenu *pCM, _In_ UINT_PTR Id, _In_ UINT GCS,
-                  _Out_writes_(cchMax) LPSTR Buf, _In_ UINT cchMax)
-{
-    HRESULT hr = pCM->GetCommandString(Id, GCS & ~GCS_UNICODE, NULL, Buf, cchMax);
-    if (FAILED(hr))
-    {
-        WCHAR buf[MAX_PATH];
-        hr = pCM->GetCommandString(Id, GCS | GCS_UNICODE, NULL, (LPSTR)buf, _countof(buf));
-        if (SUCCEEDED(hr))
-            hr = SHUnicodeToAnsi(buf, Buf, cchMax) > 0 ? S_OK : E_FAIL;
-    }
-    return hr;
-}
-
-static HRESULT SHELL32_CoCreateInitSF(LPCITEMIDLIST pidlRoot, PERSIST_FOLDER_TARGET_INFO* ppfti,
-                                LPCITEMIDLIST pidlChild, const GUID* clsid, REFIID riid, LPVOID *ppvOut)
-{
-    HRESULT hr;
-    CComPtr<IShellFolder> pShellFolder;
-
-    hr = SHCoCreateInstance(NULL, clsid, NULL, IID_PPV_ARG(IShellFolder, &pShellFolder));
-    if (FAILED(hr))
-        return hr;
-
-    LPITEMIDLIST pidlAbsolute = ILCombine (pidlRoot, pidlChild);
-    CComPtr<IPersistFolder> ppf;
-    CComPtr<IPersistFolder3> ppf3;
-
-    if (ppfti && SUCCEEDED(pShellFolder->QueryInterface(IID_PPV_ARG(IPersistFolder3, &ppf3))))
-    {
-        ppf3->InitializeEx(NULL, pidlAbsolute, ppfti);
-    }
-    else if (SUCCEEDED(pShellFolder->QueryInterface(IID_PPV_ARG(IPersistFolder, &ppf))))
-    {
-        ppf->Initialize(pidlAbsolute);
-    }
-    ILFree (pidlAbsolute);
-
-    return pShellFolder->QueryInterface(riid, ppvOut);
-}
-
-#endif // _SHELL32_
-
-static void WINAPI _InsertMenuItemW(
-        HMENU hMenu,
-        UINT indexMenu,
-        BOOL fByPosition,
-        UINT wID,
-        UINT fType,
-        LPCWSTR dwTypeData,
-        UINT fState)
-{
-    MENUITEMINFOW mii;
-    WCHAR wszText[100];
-
-    ZeroMemory(&mii, sizeof(mii));
-    mii.cbSize = sizeof(mii);
-    if (fType == MFT_SEPARATOR)
-        mii.fMask = MIIM_ID | MIIM_TYPE;
-    else if (fType == MFT_STRING)
-    {
-        mii.fMask = MIIM_ID | MIIM_TYPE | MIIM_STATE;
-        if (IS_INTRESOURCE(dwTypeData))
-        {
-            if (LoadStringW(_AtlBaseModule.GetResourceInstance(), LOWORD((ULONG_PTR)dwTypeData), wszText, _countof(wszText)))
-                mii.dwTypeData = wszText;
-            else
-            {
-                ERR("failed to load string %p\n", dwTypeData);
-                return;
-            }
-        }
-        else
-            mii.dwTypeData = (LPWSTR)dwTypeData;
-        mii.fState = fState;
-    }
-
-    mii.wID = wID;
-    mii.fType = fType;
-    InsertMenuItemW(hMenu, indexMenu, fByPosition, &mii);
-}
+#define COL_NAME_INDEX      0
+#define COL_LOCATION_INDEX  1
+#define COL_RELEVANCE_INDEX 2
 
 static HRESULT QueryActiveShellView(IUnknown *pUnkSite, REFGUID rService, IShellView **ppSV)
 {
@@ -204,7 +114,7 @@ static LPCITEMIDLIST _ILGetFSPidl(LPCITEMIDLIST pidl)
 static PIDLIST_ABSOLUTE _ILCreateAbsolute(LPCITEMIDLIST pidlChild)
 {
     PIDLIST_ABSOLUTE pidl = NULL;
-    if (PIDLIST_ABSOLUTE pidlFolder = SHSimpleIDListFromPath(_ILGetPath(pidl))) // FIXME: SHELL32_CreateSimpleIDListFromPath(, DIRECTORY)
+    if (PIDLIST_ABSOLUTE pidlFolder = SHSimpleIDListFromPathW(_ILGetPath(pidl))) // FIXME: SHELL32_CreateSimpleIDListFromPath(, DIRECTORY)
     {
         pidl = ILCombine(pidlFolder, _ILGetFSPidl(pidl));
         ILFree(pidlFolder);
